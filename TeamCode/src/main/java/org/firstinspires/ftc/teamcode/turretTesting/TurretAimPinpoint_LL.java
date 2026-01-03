@@ -23,7 +23,7 @@ import java.util.List;
 import org.firstinspires.ftc.teamcode.pinpoint.GoBildaPinpointDriver;
 
 // >>> ONLY NEW IMPORT (PoseStorage)
-import org.firstinspires.ftc.teamcode.PoseStorage;
+import org.firstinspires.ftc.teamcode.pinpoint.PoseStorage;
 
 @TeleOp(name="TurretAimPinpoint_LL", group="Test")
 public class TurretAimPinpoint_LL extends LinearOpMode {
