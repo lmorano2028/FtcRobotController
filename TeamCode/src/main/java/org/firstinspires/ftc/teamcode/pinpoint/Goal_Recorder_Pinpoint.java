@@ -1,5 +1,6 @@
 package org.firstinspires.ftc.teamcode.pinpoint;
 
+import com.qualcomm.robotcore.eventloop.opmode.Disabled;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 
@@ -10,7 +11,7 @@ import org.firstinspires.ftc.robotcore.external.navigation.Pose2D;
 import java.util.Locale;
 
 @TeleOp(name="Goal_Recorder_Pinpoint", group="Test")
-//@Disabled
+@Disabled
 public class Goal_Recorder_Pinpoint extends LinearOpMode {
 
     private GoBildaPinpointDriver odo;

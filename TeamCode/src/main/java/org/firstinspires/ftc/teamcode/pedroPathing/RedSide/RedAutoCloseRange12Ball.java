@@ -9,6 +9,7 @@ import com.qualcomm.hardware.limelightvision.LLResult;
 import com.qualcomm.hardware.limelightvision.LLResultTypes;
 import com.qualcomm.robotcore.eventloop.opmode.Autonomous;
 import com.pedropathing.util.Timer;
+import com.qualcomm.robotcore.eventloop.opmode.Disabled;
 import com.qualcomm.robotcore.eventloop.opmode.OpMode;
 import com.qualcomm.robotcore.hardware.DcMotor;
 import com.qualcomm.robotcore.hardware.DcMotorEx;
@@ -27,7 +28,9 @@ import org.firstinspires.ftc.teamcode.pedroPathing.subsystems.ShooterSubsystem;
 
 import java.util.List;
 
-@Autonomous
+@Disabled
+
+@Autonomous(name = "RedAutoCloseRange12Ball", group = "Pedro")
 public class RedAutoCloseRange12Ball extends OpMode {
     private Follower follower;
     private Timer pathTimer, opModeTimer;
@@ -60,15 +63,15 @@ public class RedAutoCloseRange12Ball extends OpMode {
     // ==========================================================
     // ODOMETRY + VISION TRIM TURRET AIM (PEDRO POSE, RED ONLY)
     // ==========================================================
-    private static final double RED_GOAL_PX = 144;
-    private static final double RED_GOAL_PY = 130;
+    private static final double RED_GOAL_PX = 142;
+    private static final double RED_GOAL_PY = 139;//was 130
 
     private static final int RED_GOAL_TAG_ID = 24;
 
     private static final double TURRET_HOME    = 0.50;
     private static final double POS_PER_DEG_CW = 0.007643;   // tuned
     private static final double SERVO_MIN_SAFE = 0.10;
-    private static final double SERVO_MAX_SAFE = 0.90;
+    private static final double SERVO_MAX_SAFE = 0.95;
 
     private static final double TURRET_FWD_OFFSET_IN  = -4.0;
     private static final double TURRET_LEFT_OFFSET_IN =  0.0;
@@ -169,16 +172,15 @@ public class RedAutoCloseRange12Ball extends OpMode {
     private final Pose shootPoseWithoutHeading = new Pose(96.11267605633803, 95.68611670020124, Math.toRadians(0));
 
     private final Pose thirdReloadStart = new Pose(95, 89, Math.toRadians(0));
-    private final Pose thirdReloadEnd   = new Pose(122, 89, Math.toRadians(0));
+    private final Pose thirdReloadEnd   = new Pose(124, 89, Math.toRadians(0));
 
     private final Pose secondReloadStart = new Pose(95.000, 66.000, Math.toRadians(0));
     private final Pose secondReloadEnd   = new Pose(123.000, 66.000, Math.toRadians(0));
-    private final Pose openGatePos = new Pose(119.000, 74.000, Math.toRadians(-90));
-
+    private final Pose openGatePos = new Pose(128.000, 74.000, Math.toRadians(-90));
     private final Pose thirdReloadStart3 = new Pose(95.000, 41.000, Math.toRadians(0));
-    private final Pose thirdReloadEnd3   = new Pose(123.000, 41.000, Math.toRadians(0));
+    private final Pose thirdReloadEnd3   = new Pose(125.000, 41.000, Math.toRadians(0));
 
-    private final Pose finalShotPose = new Pose(89, 106, Math.toRadians(0));
+    private final Pose finalShotPose = new Pose(89, 104, Math.toRadians(0));
 
     private PathChain driveStartPosShootPos, driveShootPosReloadPos, driveReloadThree, driveReloadPosToShootPos;
     private PathChain driveShotToReload2Start, driveReload2;
@@ -257,12 +259,12 @@ public class RedAutoCloseRange12Ball extends OpMode {
 
         driveShotToReload2Start = follower.pathBuilder()
                 .addPath(new BezierLine(shootPose, secondReloadStart))
-                .setLinearHeadingInterpolation(Math.toRadians(180), Math.toRadians(180))
+                .setLinearHeadingInterpolation(Math.toRadians(0), Math.toRadians(0))
                 .build();
 
         driveReload2 = follower.pathBuilder()
                 .addPath(new BezierLine(secondReloadStart, secondReloadEnd))
-                .setLinearHeadingInterpolation(Math.toRadians(180), Math.toRadians(180))
+                .setLinearHeadingInterpolation(Math.toRadians(0), Math.toRadians(0))
                 .build();
 
         driveReload2ToOpenGate = follower.pathBuilder()
@@ -270,23 +272,23 @@ public class RedAutoCloseRange12Ball extends OpMode {
                         secondReloadEnd,
                         openGatePos
                 ))
-                .setLinearHeadingInterpolation(Math.toRadians(180), Math.toRadians(-90))
+                .setLinearHeadingInterpolation(Math.toRadians(0), Math.toRadians(-90))
                 .build();
 
         driveGatePath12 = follower.pathBuilder()
                 .addPath(new BezierLine(
                         openGatePos,
-                        new Pose(32.000, 80.000)
+                        new Pose(110.000, 80.000)
                 ))
-                .setLinearHeadingInterpolation(Math.toRadians(-90), Math.toRadians(-90))
+                .setLinearHeadingInterpolation(Math.toRadians(-90), Math.toRadians(-50))
                 .build();
 
         driveOpenGateToShotPos = follower.pathBuilder()
                 .addPath(new BezierLine(
-                        new Pose(32.000, 80.000),
+                        new Pose(110.000, 80.000),
                         shootPose
                 ))
-                .setLinearHeadingInterpolation(Math.toRadians(-90), Math.toRadians(180))
+                .setLinearHeadingInterpolation(Math.toRadians(-50), Math.toRadians(0))
                 .build();
 
         driveShotToReload3Start = follower.pathBuilder()
@@ -294,7 +296,7 @@ public class RedAutoCloseRange12Ball extends OpMode {
                         shootPose,
                         thirdReloadStart3
                 ))
-                .setLinearHeadingInterpolation(Math.toRadians(180), Math.toRadians(180))
+                .setLinearHeadingInterpolation(Math.toRadians(0), Math.toRadians(0))
                 .build();
 
         driveReload3 = follower.pathBuilder()
@@ -310,7 +312,7 @@ public class RedAutoCloseRange12Ball extends OpMode {
                         thirdReloadEnd3,
                         finalShotPose
                 ))
-                .setLinearHeadingInterpolation(Math.toRadians(180), Math.toRadians(90))
+                .setLinearHeadingInterpolation(Math.toRadians(0), Math.toRadians(90))
                 .build();
     }
 
@@ -847,7 +849,7 @@ public class RedAutoCloseRange12Ball extends OpMode {
         visionDecayTimer.reset();
 
         shooter.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
-        PIDFCoefficients pidf = new PIDFCoefficients(265, 0, 0, 16.53);
+        PIDFCoefficients pidf = new PIDFCoefficients(265, 0, 0, 10.3348);
         shooter.setPIDFCoefficients(DcMotor.RunMode.RUN_USING_ENCODER, pidf);
 
         intake = new IntakeSubsystem(intake1, -0.8, -1.0);
@@ -869,11 +871,11 @@ public class RedAutoCloseRange12Ball extends OpMode {
                 -1, 24,
                 8.0,
                 265, 16.53,
-                new double[]{24,48,80,120},
-                new double[]{0.350,0.525,0.790,0.790},
-                new double[]{950,1050,1130,1380},
-                new double[]{960,1060,1140,1400},
-                new double[]{990,1090,1170,1430},
+                new double[]{16, 32, 48, 64, 80, 120},
+                new double[]{0.310, 0.530, 0.730, 0.750, 0.780, 0.790},
+                new double[]{1530, 1568, 1710, 1815, 1890, 2160},
+                new double[]{1560, 1590, 1725, 1845, 1920, 2205},
+                new double[]{1575, 1605, 1740, 1875, 1950, 2250},
                 110
         );
 

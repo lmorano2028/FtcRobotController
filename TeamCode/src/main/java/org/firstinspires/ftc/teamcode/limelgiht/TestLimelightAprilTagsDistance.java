@@ -3,6 +3,7 @@ package org.firstinspires.ftc.teamcode.limelgiht;
 import com.qualcomm.hardware.limelightvision.Limelight3A;
 import com.qualcomm.hardware.limelightvision.LLResult;
 import com.qualcomm.hardware.limelightvision.LLResultTypes;
+import com.qualcomm.robotcore.eventloop.opmode.Disabled;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 
@@ -13,6 +14,7 @@ import org.firstinspires.ftc.robotcore.external.navigation.Position;
 import java.util.List;
 
 @TeleOp(name="Test Limelight AprilTags Distance (Verbose)", group="Test")
+@Disabled
 public class TestLimelightAprilTagsDistance extends LinearOpMode {
 
     private static final int APRILTAG_PIPELINE_INDEX = 0;

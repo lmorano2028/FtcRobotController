@@ -1,6 +1,7 @@
 package org.firstinspires.ftc.teamcode.Tests;
 
 
+import com.qualcomm.robotcore.eventloop.opmode.Disabled;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.eventloop.opmode.OpMode;
 import com.qualcomm.robotcore.hardware.DcMotor;
@@ -8,7 +9,7 @@ import com.qualcomm.robotcore.hardware.DcMotorEx;
 import com.qualcomm.robotcore.hardware.Servo;
 import com.qualcomm.robotcore.util.ElapsedTime;
 
-
+@Disabled
 @TeleOp(name = "ShotMapTunerOringinal", group = "Test")
 public class ShotMapTunerOne extends OpMode {
 
@@ -74,16 +75,16 @@ public class ShotMapTunerOne extends OpMode {
 
 
     // ======= HOOD TUNING =======
-    private double hoodPos = 0.22;     // start SAFE-ish
+    private double hoodPos = 0.225;     // start SAFE-ish
     private double hoodStep = 0.005;
 
 
     // Your measured values
     private static final double HOOD_LOW_LIMIT  = 0.20;
-    private static final double HOOD_HIGH_LIMIT = 0.85;
+    private static final double HOOD_HIGH_LIMIT = 0.825;
 
 
-    private static final double HOOD_PRESET_SAFE  = 0.22;
+    private static final double HOOD_PRESET_SAFE  = 0.225;
     private static final double HOOD_PRESET_CLOSE = 0.25;
     private static final double HOOD_PRESET_MID   = 0.525;
     private static final double HOOD_PRESET_FAR   = 0.790;

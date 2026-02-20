@@ -9,6 +9,7 @@ import com.qualcomm.hardware.limelightvision.LLResult;
 import com.qualcomm.hardware.limelightvision.LLResultTypes;
 import com.qualcomm.robotcore.eventloop.opmode.Autonomous;
 import com.pedropathing.util.Timer;
+import com.qualcomm.robotcore.eventloop.opmode.Disabled;
 import com.qualcomm.robotcore.eventloop.opmode.OpMode;
 import com.qualcomm.robotcore.hardware.DcMotor;
 import com.qualcomm.robotcore.hardware.DcMotorEx;
@@ -26,8 +27,8 @@ import org.firstinspires.ftc.teamcode.pedroPathing.subsystems.LoaderSubsystem;
 import org.firstinspires.ftc.teamcode.pedroPathing.subsystems.ShooterSubsystem;
 
 import java.util.List;
-
-@Autonomous
+@Disabled
+@Autonomous(name = "BlueAutoCloseRange12ball", group = "Pedro")
 public class BlueAutoCloseRange12Ball extends OpMode {
     private Follower follower;
     private Timer pathTimer, opModeTimer;
@@ -847,7 +848,7 @@ public class BlueAutoCloseRange12Ball extends OpMode {
         visionDecayTimer.reset();
 
         shooter.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
-        PIDFCoefficients pidf = new PIDFCoefficients(265, 0, 0, 16.53);
+        PIDFCoefficients pidf = new PIDFCoefficients(265, 0, 0, 10.3348);
         shooter.setPIDFCoefficients(DcMotor.RunMode.RUN_USING_ENCODER, pidf);
 
         intake = new IntakeSubsystem(intake1, -0.8, -1.0);

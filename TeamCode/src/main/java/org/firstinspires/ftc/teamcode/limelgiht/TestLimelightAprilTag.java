@@ -4,6 +4,7 @@ package org.firstinspires.ftc.teamcode.limelgiht;
 import com.qualcomm.hardware.limelightvision.Limelight3A;
 import com.qualcomm.hardware.limelightvision.LLResult;
 import com.qualcomm.hardware.limelightvision.LLResultTypes;
+import com.qualcomm.robotcore.eventloop.opmode.Disabled;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 
@@ -25,6 +26,7 @@ import java.util.List;
  * 2) Pipeline index below must match your AprilTag pipeline (0 by default)
  */
 @TeleOp(name="Test Limelight AprilTags (Drop-In)", group="Test")
+@Disabled
 public class TestLimelightAprilTag extends LinearOpMode {
 
     // Set this to your AprilTag pipeline index in Limelight UI

@@ -1,10 +1,12 @@
-package org.firstinspires.ftc.teamcode.turretTesting;
+package org.firstinspires.ftc.teamcode.Tests.turretTesting;
 
+import com.qualcomm.robotcore.eventloop.opmode.Disabled;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.eventloop.opmode.OpMode;
 import com.qualcomm.robotcore.hardware.Servo;
 
 @TeleOp(name="TurretRecenterAndLimitsTest", group="Test")
+
 public class TurretRecenterAndLimitsTest extends OpMode {
 
     private static final String LEFT_NAME  = "LRotation";

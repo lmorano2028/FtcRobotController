@@ -23,10 +23,11 @@ import org.firstinspires.ftc.teamcode.pedroPathing.subsystems.Constants;
 import org.firstinspires.ftc.teamcode.pedroPathing.subsystems.PoseStorage;
 import org.firstinspires.ftc.teamcode.pedroPathing.subsystems.IntakeSubsystem;
 import org.firstinspires.ftc.teamcode.pedroPathing.subsystems.LoaderSubsystem;
+import org.firstinspires.ftc.teamcode.pedroPathing.subsystems.ShooterSubsystem;
 
 import java.util.List;
 
-@Autonomous
+@Autonomous(name = "BlueFarRange", group = "Blue")
 public class BlueAutoFarRange extends OpMode {
 
     private Follower follower;
@@ -42,9 +43,9 @@ public class BlueAutoFarRange extends OpMode {
 
     // ======= FIXED SHOOTER BEHAVIOR (NO CAMERA REQUIRED) =======
     // CHANGE #2: min/max/target velocity
-    private static final double SHOOT_VEL_MIN = 1410.0;
-    private static final double SHOOT_VEL_MAX = 1455.0;
-    private static final double SHOOT_VEL_TGT = 1430.0;
+    private static final double SHOOT_VEL_MIN = 1475.0;
+    private static final double SHOOT_VEL_MAX = 1520;
+    private static final double SHOOT_VEL_TGT = 1490;
 
     private static final double READY_STABLE_SEC = 0.12;
     private final com.qualcomm.robotcore.util.ElapsedTime rpmStableTimer = new com.qualcomm.robotcore.util.ElapsedTime();
@@ -55,7 +56,7 @@ public class BlueAutoFarRange extends OpMode {
 
     // ======= NEW: waits you requested =======
     private static final double RELOAD_START_WAIT_SEC = 0.25;
-    private static final double SHOOTPOSE_WAIT_SEC    = 0.50;
+    private static final double SHOOTPOSE_WAIT_SEC    = 0.20;
 
     // =====================================================================
     // ================== TURRET AIMING (COPIED STRATEGY) ===================
@@ -75,8 +76,8 @@ public class BlueAutoFarRange extends OpMode {
     // ==========================================================
     // ODOMETRY + VISION TRIM TURRET AIM (PEDRO POSE, BLUE ONLY)
     // ==========================================================
-    private static final double BLUE_GOAL_PX = 12;
-    private static final double BLUE_GOAL_PY = 144;
+    private static final double BLUE_GOAL_PX = 2;
+    private static final double BLUE_GOAL_PY = 142;
     private static final int BLUE_GOAL_TAG_ID = 20;
 
     private static final double TURRET_HOME    = 0.50;
@@ -171,6 +172,7 @@ public class BlueAutoFarRange extends OpMode {
         DRIVE_2NDRELOAD_TO_SHOOTPOSE,
         END_LOAD_AT_SHOOT_POS_2,
         SHOOT_VOLLEY_2,
+        FINAL_SHOT_TO_ENDPOSE,
 
         // NEW: terminal state to stop shootingState + auto-aim
         DONE
@@ -185,7 +187,9 @@ public class BlueAutoFarRange extends OpMode {
     private final Pose shootPose = new Pose(55.000, 20.000, Math.toRadians(155));
 
     private final Pose firstReloadStart = new Pose(41.000, 35.000, Math.toRadians(180));
-    private final Pose firstReloadEnd   = new Pose(22.0,   35.0,  Math.toRadians(180));
+    private final Pose firstReloadEnd   = new Pose(20.0,   35.0,  Math.toRadians(180));
+
+    private final Pose endPose = new Pose(52, 35, Math.toRadians(90));
 
     // ======= PATH CHAINS =======
     private PathChain driveStartToShootPose;
@@ -197,6 +201,7 @@ public class BlueAutoFarRange extends OpMode {
     private PathChain _ShotTo2ndReload;
     private PathChain _2ndReloadAgain;
     private PathChain _2ndReloadFinalRound;
+    private PathChain driveOffLine;
 
     // IMPORTANT CHANGE: after 2nd reload sweep, drive back to shooter position
     private PathChain _2ndReloadToShootPose;
@@ -211,6 +216,7 @@ public class BlueAutoFarRange extends OpMode {
     private Servo flipper;
 
     private IntakeSubsystem intake;
+    private ShooterSubsystem shooterSys;
     private LoaderSubsystem loader;
 
     // Volley control
@@ -227,7 +233,7 @@ public class BlueAutoFarRange extends OpMode {
     private boolean endLoadStarted2 = false;
 
     private static final double PRIME_FEED_SEC  = 0.45;
-    private static final double SETTLE_HOLD_SEC = 0.25;
+    private static final double SETTLE_HOLD_SEC = 0.20;
 
     private static final double RELOAD_DECOMPRESS_SEC = 0.12;
     private boolean reload3DecompressStarted = false;
@@ -349,6 +355,12 @@ public class BlueAutoFarRange extends OpMode {
                         )
                 ).setLinearHeadingInterpolation(Math.toRadians(180), shootPose.getHeading())
                 .build();
+
+        driveOffLine = follower.pathBuilder().addPath(
+                        new BezierLine(shootPose,endPose))
+                .setLinearHeadingInterpolation(shootPose.getHeading(),endPose.getHeading())
+                .build();
+
     }
 
     // ==========================================================
@@ -462,7 +474,8 @@ public class BlueAutoFarRange extends OpMode {
                         setVolleyAssist(true);
                     }
 
-                    if (loader.getState() == LoaderSubsystem.SeqState.DONE) finishedVolleyStart = true;
+                    if (loader.getState() == LoaderSubsystem.SeqState.DONE)
+                        finishedVolleyStart = true;
                 }
                 break;
             }
@@ -740,7 +753,10 @@ public class BlueAutoFarRange extends OpMode {
                     setVolleyAssist(false);
                     loader.stopAll();
                     stopShooterHold();
-                    setPathState(PathState.DONE);
+
+                    // ===== FIX: actually drive off line, then go DONE =====
+                    follower.followPath(driveOffLine, true);
+                    setPathState(PathState.FINAL_SHOT_TO_ENDPOSE);
                     break;
                 }
 
@@ -770,6 +786,13 @@ public class BlueAutoFarRange extends OpMode {
                 }
                 break;
             }
+
+            case FINAL_SHOT_TO_ENDPOSE:
+                // ===== FIX: wait for driveOffLine to finish, then DONE =====
+                if (!follower.isBusy()) {
+                    setPathState(PathState.DONE);
+                }
+                break;
 
             case DONE:
                 startTurretSettle(0.5);
@@ -834,7 +857,7 @@ public class BlueAutoFarRange extends OpMode {
         // hood.setPosition(FIXED_HOOD_POS);
 
         shooter.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
-        PIDFCoefficients pidf = new PIDFCoefficients(265, 0, 0, 16.53);
+        PIDFCoefficients pidf = new PIDFCoefficients(180, 0, 0, 15.5022);
         shooter.setPIDFCoefficients(DcMotor.RunMode.RUN_USING_ENCODER, pidf);
 
         intake = new IntakeSubsystem(intake1, -0.8, -1.0);

@@ -6,7 +6,6 @@ import com.qualcomm.hardware.limelightvision.LLResultTypes;
 
 import com.qualcomm.hardware.rev.RevHubOrientationOnRobot;
 
-import com.qualcomm.robotcore.eventloop.opmode.Disabled;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.eventloop.opmode.OpMode;
 
@@ -25,10 +24,10 @@ import org.firstinspires.ftc.robotcore.external.navigation.DistanceUnit;
 import org.firstinspires.ftc.robotcore.external.navigation.Pose2D;
 import org.firstinspires.ftc.robotcore.external.navigation.Pose3D;
 import org.firstinspires.ftc.robotcore.external.navigation.Position;
-import org.firstinspires.ftc.robotcore.external.navigation.UnnormalizedAngleUnit;
 
 import org.firstinspires.ftc.teamcode.pedroPathing.subsystems.GoBildaPinpointDriver;
 import org.firstinspires.ftc.teamcode.pedroPathing.subsystems.PoseStorage;
+import org.firstinspires.ftc.teamcode.pedroPathing.subsystems.FieldTransform;
 
 import java.util.List;
 
@@ -68,10 +67,19 @@ import java.util.List;
  *  - IR beam break sensor:
  *      beamIntake (DigitalChannel)
  *      SOLID GREEN while broken, FLASH GREEN for 1.5s when broken->clear, OFF otherwise
+ *
+ * CRITICAL ODO RULE:
+ *  - Seed Pinpoint at START from PoseStorage if valid:
+ *      pinpoint.setPosition(FieldTransform.poseStorageToPinpointPose2D());
+ *  - In loop: pinpoint.update() exactly once
+ *  - Convert Pinpoint Pose2D -> FTC inches/deg ONLY via FieldTransform:
+ *      xIn = FieldTransform.pinpointPoseToFtcXIn(pp)
+ *      yIn = FieldTransform.pinpointPoseToFtcYIn(pp)
+ *      headingDeg = FieldTransform.pinpointPoseToFtcHeadingDeg(pp)
+ *  - All distance-to-goal math uses FTC inches.
  */
-@Disabled
-@TeleOp(name="MasterTeleOp_Decode", group="Tele-Master")
-public class MasterTeleOp_Decode extends OpMode {
+@TeleOp(name="MasterTeleOp_Odo_Decode", group="Tele-Master")
+public class MasterTeleoOp_Odo_Decode extends OpMode {
 
     // ======= DRIVE CONFIG NAMES =======
     private static final String DRIVE_FR_NAME = "FR";
@@ -118,14 +126,13 @@ public class MasterTeleOp_Decode extends OpMode {
 
     // ======= DISTANCE OFFSETS =======
     private static final double CAMERA_TO_FLYWHEEL_IN = 8.0;
-    private static final double IN_PER_MM = 1.0 / 25.4;
 
     // ======= SHOT MAP TABLE (YOUR VALUES) =======
     private static final double[] DIST_IN  = { 16, 32, 48, 64, 80, 120 };
     private static final double[] HOOD_POS = { 0.310, 0.530, 0.730, 0.750, 0.780, 0.790 };
-    private static final double[] RPM_MIN  = { 1020, 1045, 1140, 1220, 1260, 1440 };
+    private static final double[] RPM_MIN  = { 1020, 1045, 1140, 1210, 1260, 1440 };
     private static final double[] RPM_TGT  = { 1040, 1060, 1150, 1230, 1280, 1470 };
-    private static final double[] RPM_MAX  = { 1050, 1070, 1160, 1250, 1300, 1500 };
+    private static final double[] RPM_MAX  = { 1050, 1070, 1160, 1250, 1300, 1500 };//previously 1030,1130,1210,1470
 
     // ======= HARDWARE =======
     private DcMotor driveFR, driveFL, driveBR, driveBL;
@@ -148,10 +155,10 @@ public class MasterTeleOp_Decode extends OpMode {
 
     // ======= FLIPPER POSITIONS =======
     private static final double FLIP_DOWN = 0.662;
-    private static final double FLIP_UP   = 0.437;
+    private static final double FLIP_UP   = 0.41;
 
     // ======= INTAKES =======
-    private static final double INTAKE1_PWR = 0.8;
+    private static final double INTAKE1_PWR = 1.0;
     private static final double INTAKE1_BURST_PWR = 1.0;
 
     // Reverse eject mode power (full reverse)
@@ -221,8 +228,8 @@ public class MasterTeleOp_Decode extends OpMode {
     private double shooterDistIn = Double.NaN;
 
     // P and F values
-    double F = 17.505;//prev 16.53
-    double P = 205.5;
+    double F = 15.5022;//prev 16.53
+    double P = 180;//prev 205.5
 
     // ======= Commands / last-known holding =======
     private double hoodCmd = HOOD_POS[0];
@@ -236,6 +243,9 @@ public class MasterTeleOp_Decode extends OpMode {
     private double lastRpmTgtCmd = 0;
     private double lastRpmMaxCmd = 0;
 
+    // FIX: HOLD-LAST should also hold the distance used/displayed
+    private double lastShooterDistIn = Double.NaN;
+
     // Track whether we saw a tag this frame
     private boolean sawTagThisFrame = false;
 
@@ -243,17 +253,37 @@ public class MasterTeleOp_Decode extends OpMode {
     private boolean teleopStarted = false;
 
     // =========================
+    // #4 NEW: Stabilize distance before mapping (filter + rpm slew + hood deadband/slew)
+    // =========================
+    private final Median3Filter shotDistMedian = new Median3Filter();
+
+    // ===== NEW: separate LPFs for RPM (smoother) vs Hood (quicker) =====
+    private final LowPassFilter shotDistLpfRpm  = new LowPassFilter(0.30); // keep smoother for RPM
+    private final LowPassFilter shotDistLpfHood = new LowPassFilter(0.80); // prev 0.65 quicker for hood response
+
+    private boolean haveLastFilteredShotDist = false;
+    private double lastFilteredShotDistIn = Double.NaN;
+
+    private final SlewLimiter rpmSlew = new SlewLimiter();
+    private final HoodController hoodStabilizer = new HoodController();
+
+    private static final double RPM_SLEW_PER_LOOP = 70.0;
+    private static final double HOOD_DEADBAND = 0.0015;//prev 0.003
+    private static final double HOOD_MAX_STEP = 0.015;//prev 0.006
+
+    // =========================
     // TURRET AIM (from your turret teleop)
     // =========================
 
-    private static final double RED_GOAL_X  = -58.3727;
-    private static final double RED_GOAL_Y  = 70.00;//previously 55.625 and 64.6425
+    // (FTC field inches)
+    private static final double RED_GOAL_X  = -58.3727;//previously -58.3727
+    private static final double RED_GOAL_Y  = 63.0000;//previously 70.00 and 64.6425
 
-    private static final double BLUE_GOAL_X = -58.3727;
-    private static final double BLUE_GOAL_Y = -70.00;//previously -55.6425
+    private static final double BLUE_GOAL_X = -58.3727;//previously -58.3727
+    private static final double BLUE_GOAL_Y = -55.625;//previously -70.00
 
     private static final double TURRET_HOME    = 0.50;
-    private static final double POS_PER_DEG_CW = 0.007643;
+    private static final double POS_PER_DEG_CW = 0.005368;//was 0.007643
     private static final double SERVO_MIN_SAFE = 0.10;
     private static final double SERVO_MAX_SAFE = 0.90;
 
@@ -263,21 +293,16 @@ public class MasterTeleOp_Decode extends OpMode {
     private static final double TURRET_FWD_OFFSET_IN  = -4.0;
     private static final double TURRET_LEFT_OFFSET_IN =  0.0;
 
-    private static final double PINPOINT_TO_FTC_X_SIGN = -1.0;
-    private static final double PINPOINT_TO_FTC_Y_SIGN = -1.0;
+    // ======= TURRET STABILITY TUNING (ANTI-HUNT) =======
+    private static final double BEARING_DEADBAND_DEG = 0.90;   // was 0.75 (reduces long-range chatter)
+    private static final int    TURRET_SETTLE_LOOPS  = 3;      // latch when inside deadband for N loops
+    private static final double TURRET_UNLATCH_MULT  = 1.4;    // must exceed deadband*mult to "wake up"
 
-    private static double pinpointXToFtc(double xPin) { return PINPOINT_TO_FTC_X_SIGN * xPin; }
-    private static double pinpointYToFtc(double yPin) { return PINPOINT_TO_FTC_Y_SIGN * yPin; }
+    private static final double SERVO_SLEW_PER_SEC   = 2.8;//was 1.2
+    private static final double MAX_STEP_PER_LOOP    = 0.045;
+    private static final double KP_DEG_TO_SERVO      = 0.0046; // base gain (distance-scaled at runtime)
 
-    private static double ftcXToPinpoint(double xFtc) { return PINPOINT_TO_FTC_X_SIGN * xFtc; }
-    private static double ftcYToPinpoint(double yFtc) { return PINPOINT_TO_FTC_Y_SIGN * yFtc; }
-
-    private static final double BEARING_DEADBAND_DEG = 0.75;
-    private static final double SERVO_SLEW_PER_SEC   = 1.2;
-    private static final double MAX_STEP_PER_LOOP    = 0.020;
-    private static final double KP_DEG_TO_SERVO      = 0.0026;
-
-    private static final double VISION_X_SIGN = +1.0;
+    private static final double VISION_X_SIGN = -1.0;
     private static final double VISION_MIN_Z_IN = 12.0;
     private static final double VISION_MAX_Z_IN = 160.0;
     private static final double VISION_MAX_TRIM_DEG = 10.0;
@@ -290,24 +315,11 @@ public class MasterTeleOp_Decode extends OpMode {
     private boolean autoAimEnabled = true;
 
     // ======= NEW: Alliance turret offset (apply only after START) =======
-    private static final double TURRET_ALLIANCE_OFFSET_DEG = 9.00;
+    private static final double TURRET_ALLIANCE_OFFSET_DEG = 0.00;
     private double turretAllianceOffsetDegCW = 0.0;
 
     private double lastTurretCmd = TURRET_HOME;
     private final ElapsedTime turretLoopTimer = new ElapsedTime();
-
-    private double headingOffsetDeg = 0.0;
-    private double seededHeadingDeg = 0.0;
-
-    private final ElapsedTime imuSettleTimer = new ElapsedTime();
-    private boolean headingOffsetLocked = false;
-    private double lastRawForStability = 0.0;
-    private boolean haveLastRaw = false;
-    private int stableCount = 0;
-
-    private static final double IMU_MIN_SETTLE_MS = 350;
-    private static final double IMU_STABLE_EPS_DEG = 0.6;
-    private static final int IMU_STABLE_LOOPS = 6;
 
     private boolean visionTrimEnabled = true;
     private boolean visionHasGood = false;
@@ -319,6 +331,79 @@ public class MasterTeleOp_Decode extends OpMode {
     private boolean turretTagSeen = false;
     private int turretTagId = -1;
     private double txDeg = Double.NaN;
+
+    // =========================================================
+    // STEP 3: Heading-rate feedforward (locks while rotating / translating)
+    // =========================================================
+    private double prevHeadingDegFTC = 0.0;
+    private boolean havePrevHeading = false;
+
+    private static final double TURRET_FF_GAIN = 0.035;   // deg turret CW per (deg robot/sec)
+    private static final double TURRET_FF_MAX_DEG = 2.50; // clamp for safety
+
+    // Telemetry taps for Step 3
+    private double lastHeadingRateDegPerSec = 0.0;
+    private double lastTurretFFDegCW = 0.0;
+
+    // =========================================================
+    // STEP 4: Translation-based LOS feedforward (dummy steps -> implemented)
+    // =========================================================
+    private static final double TRANS_LOOKAHEAD_SEC = 0.10;    // start 0.08-0.12
+    private static final double TRANS_MIN_SPEED_IN_S = 4.0;    // start 3-6
+    private static final double TRANS_MAX_FF_DEG = 6.0;        // clamp
+    private static final double TRANS_FF_STRENGTH = 1.0;       // unitless scalar
+
+    private double lastTurretXIn = 0.0;
+    private double lastTurretYIn = 0.0;
+    private boolean haveLastTurretPos = false;
+
+    // Step 4 telemetry taps
+    private double lastTurretVInPerSec = 0.0;
+    private double lastLosRateDegPerSec = 0.0;
+    private double lastTransFfDegCW = 0.0;
+    private boolean lastTransFfActive = false;
+
+    // =========================================================
+    // Pose-based shot assist + vision-range override
+    // =========================================================
+    private static final double POSE_MIN_VALID_IN = 12.0;
+    private static final double POSE_MAX_VALID_IN = 160.0;
+    private static final double POSE_MAX_STEP_IN_PER_LOOP = 30.0;     // prev 12 freeze if jump exceeds this
+    private static final double POSE_TO_FLYWHEEL_OFFSET_IN = 0.0;      // tune if needed (start 0)
+
+    // Vision range gating
+    private static final double VISION_DIST_MAX_STEP_IN_PER_LOOP = 30.0; // prev 12 freeze if tag distance jumps too much
+
+    private double lastPoseDistIn = Double.NaN;
+    private double lastVisionDistIn = Double.NaN;
+
+    // =========================================================
+    // NEW: ODO CACHE (odo.update() ONCE PER LOOP)
+    // =========================================================
+    private double cachedRobotX = 0.0;      // FTC inches
+    private double cachedRobotY = 0.0;      // FTC inches
+    private double cachedRobotXPin = 0.0;   // Pinpoint inches (for telemetry only)
+    private double cachedRobotYPin = 0.0;   // Pinpoint inches (for telemetry only)
+
+    private double cachedHeadingDegFTC = 0.0;  // FTC deg, wrapped [-180,180]
+
+    private double cachedGoalX = 0.0;       // FTC inches
+    private double cachedGoalY = 0.0;       // FTC inches
+
+    // Shooter distance sources (for telemetry)
+    private boolean usingVisionRange = false;
+    private double visionZInAbs = Double.NaN;
+    private double distPoseIn = Double.NaN;
+    private double distVisionIn = Double.NaN;
+
+    // Turret anti-hunt state (latch)
+    private int turretSettleCount = 0;
+    private boolean turretLatched = false;
+    private double lastTurretErrDegCW = 0.0;
+    private double lastTurretKpUsed = KP_DEG_TO_SERVO;
+
+    // ======= Track whether PoseStorage was valid during INIT (for telemetry) =======
+    private boolean poseStorageWasValidInInit = false;
 
     @Override
     public void init() {
@@ -364,6 +449,7 @@ public class MasterTeleOp_Decode extends OpMode {
         shooter.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
         shooter.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.FLOAT);
         shooter.setDirection(DcMotorSimple.Direction.FORWARD);
+        // PIDF set ONCE (do not re-set every loop)
         shooter.setPIDFCoefficients(DcMotor.RunMode.RUN_USING_ENCODER, new PIDFCoefficients(P, 0, 0, F));
 
         flicker.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
@@ -390,34 +476,12 @@ public class MasterTeleOp_Decode extends OpMode {
                 GoBildaPinpointDriver.EncoderDirection.REVERSED
         );
 
+        // We DO NOT seed from PoseStorage in INIT.
+        // The single most important operational step is seeding at START.
+        poseStorageWasValidInInit = PoseStorage.valid;
+
+        // Safe baseline reset (will be overridden at START if PoseStorage.valid)
         odo.resetPosAndIMU();
-        imuSettleTimer.reset();
-        headingOffsetLocked = false;
-        haveLastRaw = false;
-        stableCount = 0;
-
-        Pose2D seedPose;
-        if (PoseStorage.valid) {
-            seedPose = new Pose2D(
-                    DistanceUnit.INCH,
-                    ftcXToPinpoint(PoseStorage.xIn),
-                    ftcYToPinpoint(PoseStorage.yIn),
-                    AngleUnit.DEGREES,
-                    PoseStorage.headingDeg
-            );
-            seededHeadingDeg = wrapDeg180(PoseStorage.headingDeg);
-            PoseStorage.clear();
-        } else {
-            seedPose = new Pose2D(
-                    DistanceUnit.INCH,
-                    ftcXToPinpoint(0.0), ftcYToPinpoint(0.0),
-                    AngleUnit.DEGREES,
-                    0.0
-            );
-            seededHeadingDeg = 0.0;
-        }
-
-        odo.setPosition(seedPose);
         odo.update();
 
         // Vision trim state init (no movement)
@@ -432,8 +496,33 @@ public class MasterTeleOp_Decode extends OpMode {
         lastRpmMinCmd = rpmMinCmd;
         lastRpmTgtCmd = rpmTgtCmd;
         lastRpmMaxCmd = rpmMaxCmd;
+        lastShooterDistIn = shooterDistIn;
+
+        // #4: reset filters/slew so INIT-loop history doesn't bias START
+        shotDistMedian.reset();
+        shotDistLpfRpm.reset();
+        shotDistLpfHood.reset();
+        rpmSlew.reset();
+        hoodStabilizer.reset();
+        haveLastFilteredShotDist = false;
+        lastFilteredShotDistIn = Double.NaN;
 
         turretLoopTimer.reset();
+
+        // ===== STEP 3 init =====
+        havePrevHeading = false;
+        prevHeadingDegFTC = 0.0;
+        lastHeadingRateDegPerSec = 0.0;
+        lastTurretFFDegCW = 0.0;
+
+        // ===== STEP 4 init =====
+        haveLastTurretPos = false;
+        lastTurretXIn = 0.0;
+        lastTurretYIn = 0.0;
+        lastTurretVInPerSec = 0.0;
+        lastLosRateDegPerSec = 0.0;
+        lastTransFfDegCW = 0.0;
+        lastTransFfActive = false;
 
         // ===== RGB LIGHTS (DECOUPLED) =====
         shooterlight = hardwareMap.get(Servo.class, SHOOTER_LIGHT_NAME);
@@ -457,6 +546,12 @@ public class MasterTeleOp_Decode extends OpMode {
         // ===== NEW: ensure no alliance offset until START =====
         turretAllianceOffsetDegCW = 0.0;
 
+        lastPoseDistIn = Double.NaN;
+        lastVisionDistIn = Double.NaN;
+
+        turretSettleCount = 0;
+        turretLatched = false;
+
         telemetry.setMsTransmissionInterval(50);
         telemetry.addLine("MasterTeleOp One-Gamepad READY");
         telemetry.addLine("INIT: dpad_left=RED, dpad_right=BLUE");
@@ -474,9 +569,8 @@ public class MasterTeleOp_Decode extends OpMode {
         if (gamepad1.dpad_left)  allianceIsRed = true;
         if (gamepad1.dpad_right) allianceIsRed = false;
 
-        odo.update();
-        double raw = getRawHeadingDeg();
-        maybeLockHeadingOffset(raw);
+        // ODO UPDATE ONCE
+        updateOdoCacheOnce();
 
         updateFromLimelightAndComputeShot_HoldLast(limelight.getLatestResult());
 
@@ -485,15 +579,27 @@ public class MasterTeleOp_Decode extends OpMode {
 
         telemetry.addLine("=== INIT ===");
         telemetry.addData("Alliance", allianceIsRed ? "RED" : "BLUE");
-        telemetry.addData("HeadingOffsetLocked", headingOffsetLocked);
         telemetry.addData("HaveLastShotSolution", haveLastShotSolution);
         telemetry.addData("Last RPM tgt", "%.0f", lastRpmTgtCmd);
         telemetry.addData("Last Hood", "%.3f", lastHoodCmd);
         telemetry.addData("beamIntake(raw)", beamIntake.getState());
         telemetry.addData("IntakeBroken", !beamIntake.getState());
-        telemetry.addLine("=== PoseStorage Seed (TeleOp init) ===");
+
+        telemetry.addLine("=== PoseStorage (will seed at START) ===");
         telemetry.addData("PoseStorage.valid", PoseStorage.valid);
         telemetry.addData("PoseStorage x,y,h", "%.1f, %.1f, %.1f", PoseStorage.xIn, PoseStorage.yIn, PoseStorage.headingDeg);
+
+        telemetry.addLine("--- Odo Cache ---");
+        telemetry.addData("Pinpoint X,Y(in) [tele]", "%.1f, %.1f", cachedRobotXPin, cachedRobotYPin);
+        telemetry.addData("FTC X,Y(in)", "%.1f, %.1f", cachedRobotX, cachedRobotY);
+        telemetry.addData("FTC Heading(deg)", "%.1f", cachedHeadingDegFTC);
+
+        telemetry.addLine("--- Shot Dist ---");
+        telemetry.addData("UsingVisionRange", usingVisionRange);
+        telemetry.addData("VisionZAbs(in)", Double.isNaN(visionZInAbs) ? "N/A" : String.format("%.1f", visionZInAbs));
+        telemetry.addData("DistVision(in)", Double.isNaN(distVisionIn) ? "N/A" : String.format("%.1f", distVisionIn));
+        telemetry.addData("DistPose(in)", Double.isNaN(distPoseIn) ? "N/A" : String.format("%.1f", distPoseIn));
+
         telemetry.update();
     }
 
@@ -501,7 +607,31 @@ public class MasterTeleOp_Decode extends OpMode {
     public void start() {
         teleopStarted = true;
 
-        // ===== NEW: apply alliance turret offset ONLY after START =====
+        // ===================== CRITICAL: Seed Pinpoint from PoseStorage at START =====================
+        if (PoseStorage.valid) {
+            odo.setPosition(FieldTransform.poseStorageToPinpointPose2D());
+            // Optional immediate read so the first loop telemetry shows the seeded pose
+            odo.update();
+
+            // FIX: Clear pose/vision step-gates after seeding so the first TeleOp frame can't freeze on a "jump"
+            lastPoseDistIn = Double.NaN;
+            lastVisionDistIn = Double.NaN;
+
+            // Clear after seeding so it doesn't get reused accidentally
+            PoseStorage.clear();
+        }
+        // ============================================================================================
+
+        // #4: reset filters/slew at START so any init_loop vision doesn't bias first shots
+        shotDistMedian.reset();
+        shotDistLpfRpm.reset();
+        shotDistLpfHood.reset();
+        rpmSlew.reset();
+        hoodStabilizer.reset();
+        haveLastFilteredShotDist = false;
+        lastFilteredShotDistIn = Double.NaN;
+
+        // ===== apply alliance turret offset ONLY after START =====
         turretAllianceOffsetDegCW = allianceIsRed ? +TURRET_ALLIANCE_OFFSET_DEG : -TURRET_ALLIANCE_OFFSET_DEG;
 
         // Per request: initial mechanical positioning happens only upon START
@@ -513,6 +643,23 @@ public class MasterTeleOp_Decode extends OpMode {
 
         lastTurretCmd = TURRET_HOME;
         setTurretCmd(lastTurretCmd);
+
+        turretSettleCount = 0;
+        turretLatched = false;
+
+        // ===== STEP 3: seed heading history at START (prevents spike) =====
+        prevHeadingDegFTC = cachedHeadingDegFTC;
+        havePrevHeading = true;
+        lastHeadingRateDegPerSec = 0.0;
+        lastTurretFFDegCW = 0.0;
+
+        // ===== STEP 4: seed turret position history at START (prevents spike) =====
+        // (Uses current cached pose; turretX/Y will be computed in first runTurretAiming loop)
+        haveLastTurretPos = false;
+        lastTurretVInPerSec = 0.0;
+        lastLosRateDegPerSec = 0.0;
+        lastTransFfDegCW = 0.0;
+        lastTransFfActive = false;
 
         shooterlight.setPosition(LIGHT_OFF);
 
@@ -532,7 +679,7 @@ public class MasterTeleOp_Decode extends OpMode {
         double x = gamepad1.left_stick_x;
         double rx = gamepad1.right_stick_x;
 
-        // UPDATED: Reset yaw is now dpad_left
+        // UPDATED: Reset yaw is now dpad_left (IMU USED FOR DRIVE ONLY)
         if (gamepad1.dpad_left) {
             imu.resetYaw();
         }
@@ -558,6 +705,9 @@ public class MasterTeleOp_Decode extends OpMode {
         // Read Limelight once
         LLResult ll = limelight.getLatestResult();
 
+        // ===================== ODO UPDATE ONCE (PINPOINT IS SOURCE OF TRUTH FOR AIM) =====================
+        updateOdoCacheOnce();
+
         // ===================== EDGE DETECT =====================
         boolean a = gamepad1.a;
         boolean b = gamepad1.b;
@@ -576,7 +726,7 @@ public class MasterTeleOp_Decode extends OpMode {
         boolean rb = gamepad1.right_bumper;
         boolean rbPressed = rb && !prevRB;
 
-        // ===================== SHOT SOLUTION (HOLD LAST) =====================
+        // ===================== SHOT SOLUTION (VISION RANGE FIRST, ELSE POSE, HOLD LAST) =====================
         updateFromLimelightAndComputeShot_HoldLast(ll);
 
         // ===================== IR LIGHT (beamIntake -> IRlight) =====================
@@ -717,29 +867,46 @@ public class MasterTeleOp_Decode extends OpMode {
         if (gamepad1.left_bumper) {
             lastTurretCmd = TURRET_HOME;
             setTurretCmd(lastTurretCmd);
+            turretSettleCount = 0;
+            turretLatched = false;
+
+            // Step 4: reset pos history when you home (prevents a dt spike jump)
+            haveLastTurretPos = false;
+            lastTransFfActive = false;
         } else {
             runTurretAiming(ll);
         }
 
-        // ===================== TELEMETRY =====================
-        shooter.setPIDFCoefficients(DcMotor.RunMode.RUN_USING_ENCODER, new PIDFCoefficients(P, 0, 0, F));
+        // ===================== TELEMETRY (DIAGNOSTIC) =====================
         double vShooter = shooter.getVelocity();
-
         boolean readyNow = isShooterReadyStable();
 
         telemetry.addLine("=== One-Pad Master TeleOp ===");
         telemetry.addData("Alliance (init)", allianceIsRed ? "RED" : "BLUE");
 
         telemetry.addLine("--- Drive ---");
-        telemetry.addData("Heading(deg)", imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.DEGREES));
+        telemetry.addData("IMU Yaw(deg) [drive only]", imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.DEGREES));
+
+        telemetry.addLine("--- Odo (Pinpoint) ---");
+        telemetry.addData("Pinpoint X,Y(in) [tele]", "%.1f, %.1f", cachedRobotXPin, cachedRobotYPin);
+        telemetry.addData("FTC X,Y(in)", "%.1f, %.1f", cachedRobotX, cachedRobotY);
+        telemetry.addData("FTC Heading(deg)", "%.1f", cachedHeadingDegFTC);
+
+        telemetry.addLine("--- Shot Assist ---");
+        telemetry.addData("SawTagThisFrame", sawTagThisFrame);
+        telemetry.addData("UsingVisionRange", usingVisionRange);
+        telemetry.addData("VisionZAbs(in)", Double.isNaN(visionZInAbs) ? "N/A" : String.format("%.1f", visionZInAbs));
+        telemetry.addData("DistVision(in)", Double.isNaN(distVisionIn) ? "N/A" : String.format("%.1f", distVisionIn));
+        telemetry.addData("DistPose(in)", Double.isNaN(distPoseIn) ? "N/A" : String.format("%.1f", distPoseIn));
+        telemetry.addData("ShooterDistUsed(in)", Double.isNaN(shooterDistIn) ? "N/A" : String.format("%.1f", shooterDistIn));
 
         telemetry.addLine("--- Intake/Shooter ---");
         telemetry.addData("Intake1Enabled(A)", intake1Enabled);
         telemetry.addData("ReverseEject(dpad_down)", reverseEjectEnabled);
         telemetry.addData("ShooterEnabled(Y)", shooterEnabled);
         telemetry.addData("HaveLastShotSolution", haveLastShotSolution);
-        telemetry.addData("SawTagThisFrame", sawTagThisFrame);
         telemetry.addData("RPM tgt (held)", "%.0f", lastRpmTgtCmd);
+        telemetry.addData("RPM window", "%.0f..%.0f", lastRpmMinCmd, lastRpmMaxCmd);
         telemetry.addData("ShooterVel", "%.0f", vShooter);
         telemetry.addData("READY (shooterlight)", readyNow);
         telemetry.addData("4Shot State", state);
@@ -756,6 +923,35 @@ public class MasterTeleOp_Decode extends OpMode {
         telemetry.addData("AllianceOffsetDegCW", "%.2f", turretAllianceOffsetDegCW);
         telemetry.addData("VisionTagSeen", turretTagSeen);
         telemetry.addData("tx(deg)", Double.isNaN(txDeg) ? "N/A" : String.format("%.2f", txDeg));
+        telemetry.addData("TurretErrDegCW", "%.2f", lastTurretErrDegCW);
+        telemetry.addData("TurretLatched", turretLatched);
+        telemetry.addData("KpUsed", "%.5f", lastTurretKpUsed);
+        telemetry.addData("WantedGoalTag", allianceIsRed ? RED_GOAL_ID : BLUE_GOAL_ID);
+        telemetry.addData("ChosenGoalTag", turretTagId);
+        telemetry.addData("TagMatch", (turretTagId == (allianceIsRed ? RED_GOAL_ID : BLUE_GOAL_ID)));
+
+        // STEP 3 telemetry
+        telemetry.addData("HeadingRate(deg/s)", "%.1f", lastHeadingRateDegPerSec);
+        telemetry.addData("TurretFF(degCW)", "%.2f", lastTurretFFDegCW);
+
+        // STEP 4 telemetry
+        telemetry.addData("TurretV(in/s)", "%.1f", lastTurretVInPerSec);
+        telemetry.addData("LOSRate(deg/s)", "%.1f", lastLosRateDegPerSec);
+        telemetry.addData("TransFF(degCW)", "%.2f", lastTransFfDegCW);
+        telemetry.addData("TransFFActive", lastTransFfActive);
+
+        // ======= Fiducial debug (IDs present) =======
+        int fidCount = 0;
+        String ids = "";
+        if (ll != null && ll.isValid() && ll.getFiducialResults() != null) {
+            fidCount = ll.getFiducialResults().size();
+            StringBuilder sb = new StringBuilder();
+            for (LLResultTypes.FiducialResult t : ll.getFiducialResults()) {
+                sb.append((int) t.getFiducialId()).append(" ");
+            }
+            ids = sb.toString();
+        }
+        telemetry.addData("Fids", "%d [%s]", fidCount, ids);
 
         telemetry.update();
 
@@ -763,6 +959,28 @@ public class MasterTeleOp_Decode extends OpMode {
         prevA=a; prevB=b; prevX=xBtn; prevY=yBtn;
         prevDpadDown = dpadDown;
         prevRB = rb;
+    }
+
+    // =========================================================
+    // ODO CACHE: call odo.update() ONCE, compute FTC pose ONLY via FieldTransform
+    // =========================================================
+    private void updateOdoCacheOnce() {
+        // EXACTLY ONCE per loop
+        odo.update();
+
+        Pose2D pp = odo.getPosition();
+
+        // FTC pose MUST come from FieldTransform (single source of truth)
+        cachedRobotX = FieldTransform.pinpointPoseToFtcXIn(pp);
+        cachedRobotY = FieldTransform.pinpointPoseToFtcYIn(pp);
+        cachedHeadingDegFTC = FieldTransform.pinpointPoseToFtcHeadingDeg(pp);
+
+        // Pinpoint pose (telemetry only): convert mm -> inches (NO axis/sign transforms here)
+        cachedRobotXPin = FieldTransform.mmToIn(pp.getX(DistanceUnit.MM));
+        cachedRobotYPin = FieldTransform.mmToIn(pp.getY(DistanceUnit.MM));
+
+        cachedGoalX = allianceIsRed ? RED_GOAL_X : BLUE_GOAL_X;
+        cachedGoalY = allianceIsRed ? RED_GOAL_Y : BLUE_GOAL_Y;
     }
 
     // =========================================================
@@ -809,66 +1027,184 @@ public class MasterTeleOp_Decode extends OpMode {
     }
 
     // =========================================================
-    // ShotAssist: update from Limelight BUT HOLD last solution
+    // ShotAssist:
+    //  - VISION RANGE FIRST (zIn) when goal tag is good
+    //  - else pose distance-to-goal (FTC inches)
+    //  - hold-last if invalid/jumpy
+    //  - NO vision pose correction (safest)
     // =========================================================
     private void updateFromLimelightAndComputeShot_HoldLast(LLResult result) {
         boolean gotNewSolution = false;
         sawTagThisFrame = false;
 
+        usingVisionRange = false;
+        visionZInAbs = Double.NaN;
+        distVisionIn = Double.NaN;
+        distPoseIn = Double.NaN;
+
+        // -------- Try VISION RANGE (preferred) --------
         if (result != null && result.isValid()) {
             List<LLResultTypes.FiducialResult> tags = result.getFiducialResults();
             if (tags != null && !tags.isEmpty()) {
                 LLResultTypes.FiducialResult chosen = null;
                 for (LLResultTypes.FiducialResult t : tags) {
                     int id = (int) t.getFiducialId();
-                    if (id == BLUE_GOAL_ID || id == RED_GOAL_ID) {
+                    if ((allianceIsRed && id == RED_GOAL_ID) || (!allianceIsRed && id == BLUE_GOAL_ID)) {
                         chosen = t;
                         break;
                     }
                 }
-                if (chosen == null) chosen = tags.get(0);
+                if (chosen != null) {
+                    Pose3D camPoseTarget = null;
+                    try { camPoseTarget = chosen.getCameraPoseTargetSpace(); } catch (Exception ignored) {}
+                    if (camPoseTarget != null) {
+                        sawTagThisFrame = true;
 
-                Pose3D pose = null;
-                try { pose = chosen.getCameraPoseTargetSpace(); } catch (Exception ignored) {}
+                        Position p = camPoseTarget.getPosition();
+                        double zIn = DistanceUnit.INCH.fromUnit(p.unit, p.z);
+                        double zAbs = Math.abs(zIn);
 
-                if (pose != null) {
-                    sawTagThisFrame = true;
+                        double tx = Double.NaN;
+                        try { tx = result.getTx(); } catch (Exception ignored) {}
 
-                    Position p = pose.getPosition();
+                        if (zAbs >= VISION_MIN_Z_IN && zAbs <= VISION_MAX_Z_IN
+                                && !Double.isNaN(tx) && Math.abs(tx) <= VISION_MAX_ABS_TX_DEG) {
 
-                    double xMm = Math.abs(DistanceUnit.MM.fromUnit(p.unit, p.x));
-                    double zMm = Math.abs(DistanceUnit.MM.fromUnit(p.unit, p.z));
+                            visionZInAbs = zAbs;
 
-                    double cameraToFlywheelMm = CAMERA_TO_FLYWHEEL_IN * 25.4;
-                    double shooterHorizMm = Math.hypot(xMm, zMm + cameraToFlywheelMm);
-                    double shooterHorizIn = shooterHorizMm * IN_PER_MM;
+                            // Convert camera->tag range to flywheel->goal range
+                            // (vision range is authoritative for shot solution)
+                            double visionDistRaw = zAbs + CAMERA_TO_FLYWHEEL_IN;
+                            distVisionIn = visionDistRaw;
 
-                    shooterDistIn = shooterHorizIn;
+                            boolean visionValid = visionDistRaw >= POSE_MIN_VALID_IN && visionDistRaw <= POSE_MAX_VALID_IN;
 
-                    double newHood   = interp(DIST_IN, HOOD_POS, shooterDistIn);
-                    double newMin    = interp(DIST_IN, RPM_MIN,  shooterDistIn);
-                    double newTgt    = interp(DIST_IN, RPM_TGT,  shooterDistIn);
-                    double newMax    = interp(DIST_IN, RPM_MAX,  shooterDistIn);
+                            if (visionValid && !Double.isNaN(lastVisionDistIn)) {
+                                if (Math.abs(visionDistRaw - lastVisionDistIn) > VISION_DIST_MAX_STEP_IN_PER_LOOP) {
+                                    visionValid = false;
+                                }
+                            }
 
-                    hoodCmd = newHood;
-                    rpmMinCmd = newMin;
-                    rpmTgtCmd = newTgt;
-                    rpmMaxCmd = newMax;
+                            if (visionValid) {
+                                lastVisionDistIn = visionDistRaw;
+                                usingVisionRange = true;
 
-                    lastHoodCmd = newHood;
-                    lastRpmMinCmd = newMin;
-                    lastRpmTgtCmd = newTgt;
-                    lastRpmMaxCmd = newMax;
+                                // ===== NEW: median once, then split filters =====
+                                double visionDistMed = shotDistMedian.update(visionDistRaw);
 
-                    haveLastShotSolution = true;
-                    gotNewSolution = true;
+                                double distForHood = shotDistLpfHood.update(visionDistMed);
+                                double distForRpm  = shotDistLpfRpm.update(visionDistMed);
 
-                    if (teleopStarted) hood.setPosition(lastHoodCmd);
+                                // Keep displayed "ShooterDistUsed" as HOOD distance (what hood is using)
+                                shooterDistIn = distForHood;
+
+                                // Interpolate from SPLIT distances
+                                double newHoodRaw = interp(DIST_IN, HOOD_POS, distForHood);
+                                double newMinRaw  = interp(DIST_IN, RPM_MIN,  distForRpm);
+                                double newTgtRaw  = interp(DIST_IN, RPM_TGT,  distForRpm);
+                                double newMaxRaw  = interp(DIST_IN, RPM_MAX,  distForRpm);
+
+                                // #4: RPM slew limit (slew target; keep window width)
+                                double newTgt = rpmSlew.update(newTgtRaw, RPM_SLEW_PER_LOOP);
+                                double halfWin = 0.5 * Math.max(0.0, (newMaxRaw - newMinRaw));
+                                double newMin = Math.max(0.0, newTgt - halfWin);
+                                double newMax = newTgt + halfWin;
+
+                                // #4: Hood deadband + slew
+                                double newHood = hoodStabilizer.update(newHoodRaw, HOOD_DEADBAND, HOOD_MAX_STEP);
+
+                                hoodCmd = newHood;
+                                rpmMinCmd = newMin;
+                                rpmTgtCmd = newTgt;
+                                rpmMaxCmd = newMax;
+
+                                lastShooterDistIn = shooterDistIn;
+                                lastHoodCmd = newHood;
+                                lastRpmMinCmd = newMin;
+                                lastRpmTgtCmd = newTgt;
+                                lastRpmMaxCmd = newMax;
+
+                                // Keep legacy taps meaningful
+                                lastFilteredShotDistIn = shooterDistIn;
+                                haveLastFilteredShotDist = true;
+
+                                haveLastShotSolution = true;
+                                gotNewSolution = true;
+
+                                if (teleopStarted) hood.setPosition(lastHoodCmd);
+                                return; // vision wins; do not compute pose-based this frame
+                            }
+                        }
+                    }
                 }
             }
         }
 
+        // -------- Else POSE DISTANCE (fallback) --------
+        // MUST be FTC inches
+        double distPoseRaw = Math.hypot(cachedGoalX - cachedRobotX, cachedGoalY - cachedRobotY) + POSE_TO_FLYWHEEL_OFFSET_IN;
+        distPoseIn = distPoseRaw;
+
+        boolean poseValid = !Double.isNaN(distPoseRaw) && distPoseRaw >= POSE_MIN_VALID_IN && distPoseRaw <= POSE_MAX_VALID_IN;
+
+        // Freeze if distance jumps too much (prevents crazy RPM from a pose glitch)
+        if (poseValid && !Double.isNaN(lastPoseDistIn)) {
+            if (Math.abs(distPoseRaw - lastPoseDistIn) > POSE_MAX_STEP_IN_PER_LOOP) {
+                poseValid = false;
+            }
+        }
+
+        if (poseValid) {
+            lastPoseDistIn = distPoseRaw;
+
+            // ===== NEW: median once, then split filters =====
+            double distPoseMed = shotDistMedian.update(distPoseRaw);
+
+            double distForHood = shotDistLpfHood.update(distPoseMed);
+            double distForRpm  = shotDistLpfRpm.update(distPoseMed);
+
+            // Keep displayed "ShooterDistUsed" as HOOD distance (what hood is using)
+            shooterDistIn = distForHood;
+
+            double newHoodRaw = interp(DIST_IN, HOOD_POS, distForHood);
+            double newMinRaw  = interp(DIST_IN, RPM_MIN,  distForRpm);
+            double newTgtRaw  = interp(DIST_IN, RPM_TGT,  distForRpm);
+            double newMaxRaw  = interp(DIST_IN, RPM_MAX,  distForRpm);
+
+            // #4: RPM slew limit (slew target; keep window width)
+            double newTgt = rpmSlew.update(newTgtRaw, RPM_SLEW_PER_LOOP);
+            double halfWin = 0.5 * Math.max(0.0, (newMaxRaw - newMinRaw));
+            double newMin = Math.max(0.0, newTgt - halfWin);
+            double newMax = newTgt + halfWin;
+
+            // #4: Hood deadband + slew
+            double newHood = hoodStabilizer.update(newHoodRaw, HOOD_DEADBAND, HOOD_MAX_STEP);
+
+            hoodCmd = newHood;
+            rpmMinCmd = newMin;
+            rpmTgtCmd = newTgt;
+            rpmMaxCmd = newMax;
+
+            lastShooterDistIn = shooterDistIn;
+            lastHoodCmd = newHood;
+            lastRpmMinCmd = newMin;
+            lastRpmTgtCmd = newTgt;
+            lastRpmMaxCmd = newMax;
+
+            // Keep legacy taps meaningful
+            lastFilteredShotDistIn = shooterDistIn;
+            haveLastFilteredShotDist = true;
+
+            haveLastShotSolution = true;
+            gotNewSolution = true;
+
+            if (teleopStarted) hood.setPosition(lastHoodCmd);
+        }
+
+        // HOLD LAST if invalid/jumpy
         if (!gotNewSolution && haveLastShotSolution) {
+            shooterDistIn = lastShooterDistIn;
+
             hoodCmd = lastHoodCmd;
             rpmMinCmd = lastRpmMinCmd;
             rpmTgtCmd = lastRpmTgtCmd;
@@ -877,7 +1213,9 @@ public class MasterTeleOp_Decode extends OpMode {
             if (teleopStarted) hood.setPosition(lastHoodCmd);
         }
 
+        // If nothing ever computed
         if (!haveLastShotSolution) {
+            shooterDistIn = Double.NaN;
             hoodCmd = HOOD_POS[0];
             if (teleopStarted) hood.setPosition(hoodCmd);
             rpmMinCmd = 0;
@@ -983,18 +1321,17 @@ public class MasterTeleOp_Decode extends OpMode {
     private void stopShooter() { shooter.setPower(0); }
 
     // =========================================================
-    // Turret aiming loop
+    // Turret aiming loop (PINPOINT HEADING ONLY)
+    //  - uses cached FTC pose/heading (computed once via FieldTransform)
+    //  - anti-hunt latch inside deadband
+    //  - distance-based gain reduction at long range
+    //  - STEP 3: heading-rate feedforward (locks while moving)
+    //  - STEP 4: translation-based LOS feedforward (prevents strafe trailing)
     // =========================================================
     private void runTurretAiming(LLResult ll) {
         double dt = turretLoopTimer.seconds();
         turretLoopTimer.reset();
         dt = clamp(dt, 0.005, 0.050);
-
-        odo.update();
-
-        double rawHeadingDeg = getRawHeadingDeg();
-        maybeLockHeadingOffset(rawHeadingDeg);
-        double headingDegFTC = wrapDeg180(rawHeadingDeg + headingOffsetDeg);
 
         updateVisionTrim(ll);
 
@@ -1003,16 +1340,29 @@ public class MasterTeleOp_Decode extends OpMode {
             return;
         }
 
-        double robotX_pin = odo.getPosX(DistanceUnit.INCH);
-        double robotY_pin = odo.getPosY(DistanceUnit.INCH);
+        // ===================== STEP 3: heading-rate feedforward =====================
+        double headingRateDegPerSec = 0.0;
+        if (havePrevHeading) {
+            double dHeading = wrapDeg180(cachedHeadingDegFTC - prevHeadingDegFTC);
+            headingRateDegPerSec = dHeading / dt;
+        }
+        prevHeadingDegFTC = cachedHeadingDegFTC;
+        havePrevHeading = true;
 
-        double robotX = pinpointXToFtc(robotX_pin);
-        double robotY = pinpointYToFtc(robotY_pin);
+        double ffDegCW = clamp(
+                TURRET_FF_GAIN * headingRateDegPerSec,
+                -TURRET_FF_MAX_DEG,
+                +TURRET_FF_MAX_DEG
+        );
 
-        double goalX = allianceIsRed ? RED_GOAL_X : BLUE_GOAL_X;
-        double goalY = allianceIsRed ? RED_GOAL_Y : BLUE_GOAL_Y;
+        // store for telemetry
+        lastHeadingRateDegPerSec = headingRateDegPerSec;
+        lastTurretFFDegCW = ffDegCW;
+        // ==========================================================================
 
-        double headingRad = Math.toRadians(headingDegFTC);
+        double headingForAimDeg = cachedHeadingDegFTC; // FTC heading of robot forward
+
+        double headingRad = Math.toRadians(headingForAimDeg);
 
         double fwdX = Math.cos(headingRad);
         double fwdY = Math.sin(headingRad);
@@ -1020,24 +1370,94 @@ public class MasterTeleOp_Decode extends OpMode {
         double leftX = -Math.sin(headingRad);
         double leftY =  Math.cos(headingRad);
 
-        double turretX = robotX + fwdX * TURRET_FWD_OFFSET_IN + leftX * TURRET_LEFT_OFFSET_IN;
-        double turretY = robotY + fwdY * TURRET_FWD_OFFSET_IN + leftY * TURRET_LEFT_OFFSET_IN;
+        double turretX = cachedRobotX + fwdX * TURRET_FWD_OFFSET_IN + leftX * TURRET_LEFT_OFFSET_IN;
+        double turretY = cachedRobotY + fwdY * TURRET_FWD_OFFSET_IN + leftY * TURRET_LEFT_OFFSET_IN;
 
-        double bearingDegField = Math.toDegrees(Math.atan2(goalY - turretY, goalX - turretX));
+        double bearingDegField = Math.toDegrees(Math.atan2(cachedGoalY - turretY, cachedGoalX - turretX));
         bearingDegField = wrapDeg180(bearingDegField);
 
-        double relDegCCW = wrapDeg180(bearingDegField - headingDegFTC);
+        double relDegCCW = wrapDeg180(bearingDegField - headingForAimDeg);
         double turretDegCW_odo = -relDegCCW;
 
-        // ===== CHANGED: apply alliance offset ONLY after START (turretAllianceOffsetDegCW is 0.0 until start()) =====
-        double turretDegCW_total = wrapDeg180(turretDegCW_odo + turretAllianceOffsetDegCW);
-        if (visionTrimEnabled) turretDegCW_total = wrapDeg180(turretDegCW_total + visionTrimDegCW);
+        // =========================================================
+        // STEP 4: Translation-based LOS feedforward
+        // =========================================================
+        double vx = 0.0;
+        double vy = 0.0;
+
+        if (haveLastTurretPos) {
+            vx = (turretX - lastTurretXIn) / dt;
+            vy = (turretY - lastTurretYIn) / dt;
+        }
+
+        lastTurretXIn = turretX;
+        lastTurretYIn = turretY;
+        haveLastTurretPos = true;
+
+        double speed = Math.hypot(vx, vy);
+        lastTurretVInPerSec = speed;
+
+        double losRateDegPerSec = 0.0; // +CCW
+        double ffTransDegCW = 0.0;
+        boolean ffActive = false;
+
+        if (speed >= TRANS_MIN_SPEED_IN_S) {
+            double dx = cachedGoalX - turretX;
+            double dy = cachedGoalY - turretY;
+            double r2 = (dx * dx) + (dy * dy);
+
+            if (r2 > 1e-6) {
+                double losRateRadPerSec = (vx * dy - vy * dx) / r2;
+                losRateDegPerSec = Math.toDegrees(losRateRadPerSec);
+
+                ffTransDegCW = clamp(
+                        -(losRateDegPerSec * TRANS_LOOKAHEAD_SEC * TRANS_FF_STRENGTH),
+                        -TRANS_MAX_FF_DEG,
+                        +TRANS_MAX_FF_DEG
+                );
+
+                ffActive = true;
+            }
+        }
+
+        lastLosRateDegPerSec = losRateDegPerSec;
+        lastTransFfDegCW = ffTransDegCW;
+        lastTransFfActive = ffActive;
+
+        double turretDegCW_total = wrapDeg180(turretDegCW_odo + turretAllianceOffsetDegCW + ffDegCW + ffTransDegCW);
+
+        if (visionTrimEnabled && turretTagSeen && Math.abs(visionTrimDegCW) < 4.0) {
+            turretDegCW_total = wrapDeg180(turretDegCW_total + visionTrimDegCW);
+        }
 
         double currentTurretDegCW = (lastTurretCmd - TURRET_HOME) / POS_PER_DEG_CW;
         double errDegCW = wrapDeg180(turretDegCW_total - currentTurretDegCW);
-        if (Math.abs(errDegCW) < BEARING_DEADBAND_DEG) errDegCW = 0.0;
+        lastTurretErrDegCW = errDegCW;
 
-        double deltaServo = errDegCW * KP_DEG_TO_SERVO;
+        double deadband = BEARING_DEADBAND_DEG;
+        double unlatchBand = deadband * TURRET_UNLATCH_MULT;
+
+        if (Math.abs(errDegCW) <= deadband) {
+            turretSettleCount++;
+            if (turretSettleCount >= TURRET_SETTLE_LOOPS) turretLatched = true;
+        } else {
+            turretSettleCount = 0;
+            if (Math.abs(errDegCW) >= unlatchBand) turretLatched = false;
+        }
+
+        if (turretLatched && !ffActive) {
+            setTurretCmd(lastTurretCmd);
+            return;
+        }
+
+        if (Math.abs(errDegCW) < deadband) errDegCW = 0.0;
+
+        double distToGoal = Math.hypot(cachedGoalX - cachedRobotX, cachedGoalY - cachedRobotY);
+        double gainScale = clamp(48.0 / Math.max(24.0, distToGoal), 0.75, 1.00);
+        double kpUsed = KP_DEG_TO_SERVO * gainScale;
+        lastTurretKpUsed = kpUsed;
+
+        double deltaServo = errDegCW * kpUsed;
         double desiredCmd = clamp(lastTurretCmd + deltaServo, SERVO_MIN_SAFE, SERVO_MAX_SAFE);
 
         double appliedCmd = slewTo(lastTurretCmd, desiredCmd, SERVO_SLEW_PER_SEC, dt);
@@ -1053,10 +1473,9 @@ public class MasterTeleOp_Decode extends OpMode {
         turretTagSeen = false;
         turretTagId = -1;
         txDeg = Double.NaN;
+        final int wantedId = allianceIsRed ? RED_GOAL_ID : BLUE_GOAL_ID;
 
         if (result == null || !result.isValid()) { handleVisionLost(); return; }
-
-        txDeg = result.getTx();
 
         List<LLResultTypes.FiducialResult> tags = result.getFiducialResults();
         if (tags == null || tags.isEmpty()) { handleVisionLost(); return; }
@@ -1064,9 +1483,17 @@ public class MasterTeleOp_Decode extends OpMode {
         LLResultTypes.FiducialResult chosen = null;
         for (LLResultTypes.FiducialResult t : tags) {
             int id = (int) t.getFiducialId();
-            if (id == BLUE_GOAL_ID || id == RED_GOAL_ID) { chosen = t; break; }
+            if (id == wantedId) {
+                chosen = t;
+                break;
+            }
         }
-        if (chosen == null) chosen = tags.get(0);
+        if (chosen == null) {
+            handleVisionLost();
+            return;
+        }
+
+        try { txDeg = result.getTx(); } catch (Exception ignored) { txDeg = Double.NaN; }
 
         Pose3D pose = null;
         try { pose = chosen.getCameraPoseTargetSpace(); } catch (Exception ignored) {}
@@ -1099,6 +1526,8 @@ public class MasterTeleOp_Decode extends OpMode {
     }
 
     private void handleVisionLost() {
+        turretTagSeen = false;
+
         if (!visionHasGood) {
             visionTrimDegCW_raw = 0.0;
             visionTrimDegCW = 0.0;
@@ -1115,38 +1544,6 @@ public class MasterTeleOp_Decode extends OpMode {
             visionTrimDegCW = 0.0;
             visionTrimDegCW_raw = 0.0;
             visionHasGood = false;
-        }
-    }
-
-    private double getRawHeadingDeg() {
-        return wrapDeg180(Math.toDegrees(odo.getHeading(UnnormalizedAngleUnit.RADIANS)));
-    }
-
-    private void maybeLockHeadingOffset(double rawDegNow) {
-        if (headingOffsetLocked) return;
-
-        if (imuSettleTimer.milliseconds() < IMU_MIN_SETTLE_MS) {
-            haveLastRaw = false;
-            stableCount = 0;
-            return;
-        }
-
-        if (!haveLastRaw) {
-            lastRawForStability = rawDegNow;
-            haveLastRaw = true;
-            stableCount = 0;
-            return;
-        }
-
-        double delta = wrapDeg180(rawDegNow - lastRawForStability);
-        lastRawForStability = rawDegNow;
-
-        if (Math.abs(delta) <= IMU_STABLE_EPS_DEG) stableCount++;
-        else stableCount = 0;
-
-        if (stableCount >= IMU_STABLE_LOOPS) {
-            headingOffsetDeg = wrapDeg180(seededHeadingDeg - rawDegNow);
-            headingOffsetLocked = true;
         }
     }
 
@@ -1172,6 +1569,59 @@ public class MasterTeleOp_Decode extends OpMode {
         while (d > 180.0) d -= 360.0;
         while (d < -180.0) d += 360.0;
         return d;
+    }
+
+    // =========================================================
+    // #4 helper classes (embedded for copy/paste)
+    // =========================================================
+    private static class Median3Filter {
+        private double a = Double.NaN, b = Double.NaN, c = Double.NaN;
+        public void reset() { a = b = c = Double.NaN; }
+        public double update(double x) {
+            a = b; b = c; c = x;
+            if (Double.isNaN(a) || Double.isNaN(b)) return x;
+            return Math.max(Math.min(a, b), Math.min(Math.max(a, b), c));
+        }
+    }
+
+    private static class LowPassFilter {
+        private boolean init = false;
+        private double y = 0.0;
+        private final double alpha;
+        public LowPassFilter(double alpha) { this.alpha = alpha; }
+        public void reset() { init = false; y = 0.0; }
+        public double update(double x) {
+            if (!init) { y = x; init = true; return y; }
+            y = y + alpha * (x - y);
+            return y;
+        }
+    }
+
+    private static class SlewLimiter {
+        private double last = Double.NaN;
+        public void reset() { last = Double.NaN; }
+        public double update(double target, double maxDeltaPerCall) {
+            if (Double.isNaN(last)) { last = target; return last; }
+            double delta = target - last;
+            if (delta >  maxDeltaPerCall) delta =  maxDeltaPerCall;
+            if (delta < -maxDeltaPerCall) delta = -maxDeltaPerCall;
+            last += delta;
+            return last;
+        }
+    }
+
+    private static class HoodController {
+        private double last = Double.NaN;
+        public void reset() { last = Double.NaN; }
+        public double update(double targetPos, double deadband, double maxStep) {
+            if (Double.isNaN(last)) { last = targetPos; return last; }
+            if (Math.abs(targetPos - last) <= deadband) return last;
+            double delta = targetPos - last;
+            if (delta >  maxStep) delta =  maxStep;
+            if (delta < -maxStep) delta = -maxStep;
+            last += delta;
+            return last;
+        }
     }
 
     @Override

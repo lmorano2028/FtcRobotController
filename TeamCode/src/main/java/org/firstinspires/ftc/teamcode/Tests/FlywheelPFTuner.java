@@ -1,5 +1,6 @@
 package org.firstinspires.ftc.teamcode.Tests;
 
+import com.qualcomm.robotcore.eventloop.opmode.Disabled;
 import com.qualcomm.robotcore.eventloop.opmode.OpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.hardware.DcMotor;
@@ -8,17 +9,17 @@ import com.qualcomm.robotcore.hardware.DcMotorSimple;
 import com.qualcomm.robotcore.hardware.PIDFCoefficients;
 
 @TeleOp
+@Disabled
 public class FlywheelPFTuner extends OpMode {
     public DcMotorEx flywheelMotor;
 
-    public double highVelocity = 1440;
-    public double lowVelocity = 1260;
+    public double highVelocity = 1950;
+    public double lowVelocity = 2200;
 
     double curTargetVelocity = highVelocity;
 
-    double F = 0;
-
-    double P = 0;
+    double F = 12.3348;//prev 16.53
+    double P = 180;
     
     double[] stepSizes = {10.0, 1.0, 0.1, 0.001, 0.0001};
 

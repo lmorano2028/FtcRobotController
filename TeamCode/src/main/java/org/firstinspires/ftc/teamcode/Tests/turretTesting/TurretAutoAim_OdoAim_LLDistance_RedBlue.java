@@ -1,9 +1,10 @@
-package org.firstinspires.ftc.teamcode;
+package org.firstinspires.ftc.teamcode.Tests.turretTesting;
 
 import com.qualcomm.hardware.limelightvision.Limelight3A;
 import com.qualcomm.hardware.limelightvision.LLResult;
 import com.qualcomm.hardware.limelightvision.LLResultTypes;
 
+import com.qualcomm.robotcore.eventloop.opmode.Disabled;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.eventloop.opmode.OpMode;
 
@@ -22,6 +23,7 @@ import java.util.List;
 import java.util.Locale;
 
 @TeleOp(name="TurretAutoAim_OdoAim_LLDistance_RedBlue", group="Test")
+@Disabled
 public class TurretAutoAim_OdoAim_LLDistance_RedBlue extends OpMode {
 
     // ===== Hardware names =====

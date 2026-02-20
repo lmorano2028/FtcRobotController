@@ -12,4 +12,3 @@ public class PoseStorage {
         valid = false;
     }
 }
-

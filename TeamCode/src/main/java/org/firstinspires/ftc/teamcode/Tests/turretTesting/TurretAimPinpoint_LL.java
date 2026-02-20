@@ -1,9 +1,10 @@
-package org.firstinspires.ftc.teamcode.turretTesting;
+package org.firstinspires.ftc.teamcode.Tests.turretTesting;
 
 import com.qualcomm.hardware.limelightvision.Limelight3A;
 import com.qualcomm.hardware.limelightvision.LLResult;
 import com.qualcomm.hardware.limelightvision.LLResultTypes;
 
+import com.qualcomm.robotcore.eventloop.opmode.Disabled;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 
@@ -26,6 +27,7 @@ import org.firstinspires.ftc.teamcode.pinpoint.GoBildaPinpointDriver;
 import org.firstinspires.ftc.teamcode.pinpoint.PoseStorage;
 
 @TeleOp(name="TurretAimPinpoint_LL", group="Test")
+@Disabled
 public class TurretAimPinpoint_LL extends LinearOpMode {
 
     // =========================

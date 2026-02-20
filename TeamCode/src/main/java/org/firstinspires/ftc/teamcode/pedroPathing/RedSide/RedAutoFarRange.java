@@ -21,12 +21,14 @@ import org.firstinspires.ftc.robotcore.external.navigation.Position;
 
 import org.firstinspires.ftc.teamcode.pedroPathing.subsystems.Constants;
 import org.firstinspires.ftc.teamcode.pedroPathing.subsystems.PoseStorage;
+import org.firstinspires.ftc.teamcode.pedroPathing.subsystems.FieldTransform;
 import org.firstinspires.ftc.teamcode.pedroPathing.subsystems.IntakeSubsystem;
 import org.firstinspires.ftc.teamcode.pedroPathing.subsystems.LoaderSubsystem;
+import org.firstinspires.ftc.teamcode.pedroPathing.subsystems.ShooterSubsystem;
 
 import java.util.List;
 
-@Autonomous
+@Autonomous(name = "RedAutoFarRange", group = "Red")
 public class RedAutoFarRange extends OpMode {
 
     private Follower follower;
@@ -40,26 +42,7 @@ public class RedAutoFarRange extends OpMode {
     private static final String HOOD_NAME      = "Shooter hood";
     private static final String FLIPPER_NAME   = "fingler";
 
-    // ======= FIXED SHOOTER BEHAVIOR (NO CAMERA REQUIRED) =======
-    // CHANGE #2: min/max/target velocity
-    private static final double SHOOT_VEL_MIN = 1410.0;
-    private static final double SHOOT_VEL_MAX = 1455.0;
-    private static final double SHOOT_VEL_TGT = 1430.0;
-
-    private static final double READY_STABLE_SEC = 0.12;
-    private final com.qualcomm.robotcore.util.ElapsedTime rpmStableTimer = new com.qualcomm.robotcore.util.ElapsedTime();
-    private boolean rpmInBand = false;
-
-    private static final double FIXED_HOOD_POS = 0.790;
-    private boolean shooterHoldActive = false;
-
-    // ======= NEW: waits you requested =======
-    private static final double RELOAD_START_WAIT_SEC = 0.25;
-    private static final double SHOOTPOSE_WAIT_SEC    = 0.50;
-
-    // =====================================================================
-    // ================== TURRET AIMING (COPIED STRATEGY) ===================
-    // =====================================================================
+    // ======= TURRET AIMING (ODO + LL tx TRIM) =======
     private static final String TURRET_LEFT_NAME  = "LRotation";
     private static final String TURRET_RIGHT_NAME = "RRotation";
     private static final boolean MIRROR_RIGHT = false;
@@ -75,8 +58,8 @@ public class RedAutoFarRange extends OpMode {
     // ==========================================================
     // ODOMETRY + VISION TRIM TURRET AIM (PEDRO POSE, RED ONLY)
     // ==========================================================
-    private static final double RED_GOAL_PX = 132;
-    private static final double RED_GOAL_PY = 144;
+    private static final double RED_GOAL_PX = 136;
+    private static final double RED_GOAL_PY = 142;
     private static final int RED_GOAL_TAG_ID = 24;
 
     private static final double TURRET_HOME    = 0.50;
@@ -104,8 +87,8 @@ public class RedAutoFarRange extends OpMode {
 
     private static final double VISION_MAX_ABS_TX_DEG = 8.0;
 
-    // CHANGE: bias turret back toward home (negative CW)
-    private static final double TURRET_BIAS_DEG_CW = -2.75;
+    // (kept from your code)
+    private static final double TURRET_BIAS_DEG_CW = -1.00;
 
     private double lastTurretCmd = TURRET_HOME;
     private final com.qualcomm.robotcore.util.ElapsedTime loopTimer = new com.qualcomm.robotcore.util.ElapsedTime();
@@ -124,7 +107,7 @@ public class RedAutoFarRange extends OpMode {
     private double txDeg = Double.NaN;
 
     // ==========================================================
-    // Pre-shoot readiness latch (RPM-based; camera not required)
+    // Pre-shoot readiness latch (pre-check while driving; never fire until stopped)
     // ==========================================================
     private static final double READY_LATCH_HOLD_SEC = 0.50;
     private static final double PRECHECK_DIST_IN = 10.0;
@@ -133,59 +116,23 @@ public class RedAutoFarRange extends OpMode {
     private final com.qualcomm.robotcore.util.ElapsedTime readyLatchTimer = new com.qualcomm.robotcore.util.ElapsedTime();
 
     // ==========================================================
-    // PoseStorage seeding (Pedro -> FTC) for TeleOp
+    // Option B: "never deadlocks" gate when tag is missing
     // ==========================================================
-    private static final double FIELD_HALF_IN = 72.0;
-    private static final double PEDRO_TO_FTC_HEADING_OFFSET_DEG = +90.0;
+    private static final double NO_TAG_START_TIMEOUT_SEC = 0.70;
+    private final com.qualcomm.robotcore.util.ElapsedTime shootGateTimer = new com.qualcomm.robotcore.util.ElapsedTime();
 
-    private static double pedroToFtcX(double pedroY) { return FIELD_HALF_IN - pedroY; }
-    private static double pedroToFtcY(double pedroX) { return pedroX - FIELD_HALF_IN; }
+    // ======= NEW: waits you requested (kept) =======
+    private static final double RELOAD_START_WAIT_SEC = 0.25;
+    private static final double SHOOTPOSE_WAIT_SEC    = 0.50;
 
-    // ==========================================================
-    // States
-    // ==========================================================
-    public enum PathState {
-        // NEW: drive to shot point first, then wait 0.5s, then shoot
-        DRIVE_START_TO_SHOOTPOSE,
-        WAIT_AT_SHOOTPOSE,
-        END_LOAD_AT_START,
-        SHOOT_VOLLEY_START,
-
-        // First reload: add 0.25s wait after reaching reload start
-        DRIVE_3RDSHOT_TO_3RDRELOADSTART,
-        WAIT_AT_RELOAD1_START,
-        DRIVE_3RDRELOADSTART_TO_END,
-        RELOAD3_DECOMPRESS,
-
-        DRIVE_1STRELOAD_TO_SHOOTPOS,
-        END_LOAD_AT_SHOOT_POS,
-        SHOOT_VOLLEY_1,
-
-        // Second reload (alliance area): add 0.25s wait after reaching reload start
-        DRIVE_SHOT_TO_2NDRELOAD_START,
-        WAIT_AT_RELOAD2_START,
-        DRIVE_2NDRELOAD_AGAIN,
-        DRIVE_2NDRELOAD_FINALROUND,
-        RELOAD2_DECOMPRESS,
-
-        DRIVE_2NDRELOAD_TO_SHOOTPOSE,
-        END_LOAD_AT_SHOOT_POS_2,
-        SHOOT_VOLLEY_2,
-
-        // NEW: terminal state to stop shootingState + auto-aim
-        DONE
-    }
-
-    PathState pathState;
-
-    // ======= POSES (MIRRORED FOR RED) =======
+    // ======= POSES (RED) =======
     private final Pose startPose = new Pose(84.000, 10.000, Math.toRadians(0));
-
-    // NEW: your requested shooter position and wait-before-shoot (MIRRORED)
-    private final Pose shootPose = new Pose(89.000, 20.000, Math.toRadians(25));
+    private final Pose shootPose = new Pose(89.000, 15.000, Math.toRadians(25));
 
     private final Pose firstReloadStart = new Pose(103.000, 35.000, Math.toRadians(0));
-    private final Pose firstReloadEnd   = new Pose(122.0,   35.0,  Math.toRadians(0));
+    private final Pose firstReloadEnd   = new Pose(125.0,   35.0,  Math.toRadians(0));
+
+    private final Pose endPose = new Pose(92, 35, Math.toRadians(90));
 
     // ======= PATH CHAINS =======
     private PathChain driveStartToShootPose;
@@ -198,11 +145,12 @@ public class RedAutoFarRange extends OpMode {
     private PathChain _2ndReloadAgain;
     private PathChain _2ndReloadFinalRound;
 
-    // IMPORTANT CHANGE: after 2nd reload sweep, drive back to shooter position
     private PathChain _2ndReloadToShootPose;
 
+    private PathChain driveOffLine;
+
     // Hardware
-    private Limelight3A limelight; // optional
+    private Limelight3A limelight;
     private DcMotorEx shooter;
     private DcMotorEx flicker;
     private DcMotorEx intake1;
@@ -212,6 +160,7 @@ public class RedAutoFarRange extends OpMode {
 
     private IntakeSubsystem intake;
     private LoaderSubsystem loader;
+    private ShooterSubsystem shooterSys;
 
     // Volley control
     private boolean startedVolleyStart = false;
@@ -240,129 +189,122 @@ public class RedAutoFarRange extends OpMode {
         if (intake != null) intake.setEnabled(on);
     }
 
-    // ======= NEW: gating turret movement until after START =======
-    private boolean allowTurretMotion = false;
+    // ======= NEW: no init movement; do first servo+enable commands in start() only =======
+    private boolean didStartCommands = false;
 
     // ==========================================================
-    // Shooter hold helpers
+    // States (UNCHANGED)
     // ==========================================================
-    private void startShooterHold1440() {
-        shooterHoldActive = true;
-        rpmInBand = false;
-        rpmStableTimer.reset();
-        if (shooter != null) shooter.setVelocity(SHOOT_VEL_TGT); // CHANGE #2
-        if (hood != null) hood.setPosition(FIXED_HOOD_POS);
+    public enum PathState {
+        DRIVE_START_TO_SHOOTPOSE,
+        WAIT_AT_SHOOTPOSE,
+        END_LOAD_AT_START,
+        SHOOT_VOLLEY_START,
+
+        DRIVE_3RDSHOT_TO_3RDRELOADSTART,
+        WAIT_AT_RELOAD1_START,
+        DRIVE_3RDRELOADSTART_TO_END,
+        RELOAD3_DECOMPRESS,
+
+        DRIVE_1STRELOAD_TO_SHOOTPOS,
+        END_LOAD_AT_SHOOT_POS,
+        SHOOT_VOLLEY_1,
+
+        DRIVE_SHOT_TO_2NDRELOAD_START,
+        WAIT_AT_RELOAD2_START,
+        DRIVE_2NDRELOAD_AGAIN,
+        DRIVE_2NDRELOAD_FINALROUND,
+        RELOAD2_DECOMPRESS,
+
+        DRIVE_2NDRELOAD_TO_SHOOTPOSE,
+        END_LOAD_AT_SHOOT_POS_2,
+        SHOOT_VOLLEY_2,
+
+        FINAL_SHOT_TO_ENDPOSE,
+        DONE
     }
 
-    private void stopShooterHold() {
-        shooterHoldActive = false;
-        rpmInBand = false;
-        rpmStableTimer.reset();
-        if (shooter != null) shooter.setVelocity(0);
-    }
-
-    private boolean isShooterReadyStableFixed() {
-        if (shooter == null) return false;
-        double v = shooter.getVelocity();
-        boolean inBand = (v >= SHOOT_VEL_MIN) && (v <= SHOOT_VEL_MAX); // CHANGE #2
-
-        if (inBand) {
-            if (!rpmInBand) {
-                rpmInBand = true;
-                rpmStableTimer.reset();
-            }
-            return rpmStableTimer.seconds() >= READY_STABLE_SEC;
-        } else {
-            rpmInBand = false;
-            rpmStableTimer.reset();
-            return false;
-        }
-    }
+    PathState pathState;
 
     // ==========================================================
-    // Paths
+    // PoseStorage force-write helper (matches RedAutoCloseRange12BallOdo)
+    // ==========================================================
+    private void writePoseStorageNow() {
+        if (follower == null) return;
+
+        Pose p = follower.getPose();
+        double pedroX = p.getX();
+        double pedroY = p.getY();
+        double pedroHeadingDeg = Math.toDegrees(p.getHeading());
+
+        FieldTransform.writePoseStorageFromPedro(
+                pedroX,
+                pedroY,
+                pedroHeadingDeg
+        );
+    }
+
+    // ==========================================================
+    // Paths (UNCHANGED)
     // ==========================================================
     public void buildPaths() {
 
-        // NEW: start -> shooter point (mirrored)
         driveStartToShootPose = follower.pathBuilder().addPath(
-                        new BezierLine(
-                                startPose,
-                                shootPose
-                        )
+                        new BezierLine(startPose, shootPose)
                 ).setLinearHeadingInterpolation(startPose.getHeading(), shootPose.getHeading())
                 .build();
 
         _3rdshotto3rdreloadstart = follower.pathBuilder().addPath(
-                        new BezierLine(
-                                startPose,
-                                firstReloadStart
-                        )
+                        new BezierLine(startPose, firstReloadStart)
                 ).setLinearHeadingInterpolation(Math.toRadians(0), Math.toRadians(0))
                 .build();
 
         _3rdreloadstarttoend = follower.pathBuilder().addPath(
-                        new BezierLine(
-                                firstReloadStart,
-                                firstReloadEnd
-                        )
+                        new BezierLine(firstReloadStart, firstReloadEnd)
                 ).setTangentHeadingInterpolation()
                 .build();
 
         _1stReloadToShootPos = follower.pathBuilder().addPath(
-                        new BezierLine(
-                                firstReloadEnd,
-                                shootPose
-                        )
+                        new BezierLine(firstReloadEnd, shootPose)
                 ).setLinearHeadingInterpolation(Math.toRadians(0), shootPose.getHeading())
                 .build();
 
         _ShotTo2ndReload = follower.pathBuilder().addPath(
-                        new BezierLine(
-                                shootPose,
-                                new Pose(131.000, 15.000)
-                        )
+                        new BezierLine(shootPose, new Pose(131.000, 15.000))
                 ).setLinearHeadingInterpolation(shootPose.getHeading(), Math.toRadians(0))
                 .build();
 
         _2ndReloadAgain = follower.pathBuilder().addPath(
-                        new BezierLine(
-                                new Pose(131.000, 15.000),
-                                new Pose(124.000, 11.000)
-                        )
+                        new BezierLine(new Pose(131.000, 15.000), new Pose(124.000, 11.000))
                 ).setLinearHeadingInterpolation(Math.toRadians(0), Math.toRadians(0))
                 .build();
 
         _2ndReloadFinalRound = follower.pathBuilder().addPath(
-                        new BezierLine(
-                                new Pose(124.000, 11.000),
-                                new Pose(131.000, 11.000)
-                        )
+                        new BezierLine(new Pose(124.000, 11.000), new Pose(131.000, 11.000))
                 ).setTangentHeadingInterpolation()
                 .build();
 
-        // IMPORTANT CHANGE: return to shootPose after the alliance-area sweep (mirrored)
         _2ndReloadToShootPose = follower.pathBuilder().addPath(
-                        new BezierLine(
-                                new Pose(131.000, 11.000),
-                                shootPose
-                        )
+                        new BezierLine(new Pose(131.000, 11.000), shootPose)
                 ).setLinearHeadingInterpolation(Math.toRadians(0), shootPose.getHeading())
+                .build();
+
+        driveOffLine = follower.pathBuilder().addPath(
+                        new BezierLine(shootPose, endPose)
+                ).setLinearHeadingInterpolation(shootPose.getHeading(), endPose.getHeading())
                 .build();
     }
 
     // ==========================================================
-    // State machine
+    // State machine (converted to CloseRange ODO+LL trim + ShooterSubsystem gating)
     // ==========================================================
     public void statePathUpdate() {
         switch (pathState) {
 
-            // ======================================================
-            // NEW OPENING: drive out to shooter point, wait 0.5s, then start shooting sequence
-            // ======================================================
             case DRIVE_START_TO_SHOOTPOSE:
+                // follower.followPath kicked in start()
+                resetReadyLatch();
                 if (follower.isBusy()) {
-                    // keep everything safe while driving out
                     if (!volleyAssistActive) intake.setEnabled(false);
                     loader.hold();
                 } else {
@@ -372,13 +314,11 @@ public class RedAutoFarRange extends OpMode {
                 break;
 
             case WAIT_AT_SHOOTPOSE:
-                // wait 0.5 seconds at shoot pose before starting load/shoot
                 if (pathTimer.getElapsedTimeSeconds() < SHOOTPOSE_WAIT_SEC) {
                     if (!volleyAssistActive) intake.setEnabled(false);
                     loader.hold();
                     break;
                 }
-                // now begin the normal pre-load at start (which is now the shootPose)
                 endLoadStartedStart = false;
                 startedVolleyStart = false;
                 finishedVolleyStart = false;
@@ -386,17 +326,24 @@ public class RedAutoFarRange extends OpMode {
                 setPathState(PathState.END_LOAD_AT_START);
                 break;
 
-            // ======================================================
-            // Shoot from shootPose (your “start shooting sequence”)
-            // ======================================================
             case END_LOAD_AT_START: {
+                shooterSys.update();
+                startTurretSettle(getAutoAimTurretCmd());
+
+                if (follower.isBusy()) {
+                    if (!volleyAssistActive) intake.setEnabled(false);
+                    loader.hold();
+                    updateReadyLatchNear(shootPose);
+                    break;
+                }
+
                 if (!isTurretSettled()) {
                     if (!volleyAssistActive) intake.setEnabled(false);
                     loader.hold();
                     break;
                 }
 
-                boolean ready = isShooterReadyStableFixed();
+                boolean ready = shooterSys.isShooterReadyStable();
 
                 if (!endLoadStartedStart) {
                     endLoadStartedStart = true;
@@ -420,6 +367,7 @@ public class RedAutoFarRange extends OpMode {
                     loader.decompress();
                     if (!volleyAssistActive) intake.setEnabled(false);
 
+                    shooterSys.resetReadyStable();
                     startedVolleyStart = false;
                     finishedVolleyStart = false;
 
@@ -429,8 +377,10 @@ public class RedAutoFarRange extends OpMode {
             }
 
             case SHOOT_VOLLEY_START: {
+                shooterSys.update();
+                startTurretSettle(getAutoAimTurretCmd());
+
                 if (finishedVolleyStart) {
-                    stopShooterHold();
                     setVolleyAssist(false);
                     loader.stopAll();
 
@@ -445,18 +395,22 @@ public class RedAutoFarRange extends OpMode {
                     break;
                 }
 
-                boolean okToStart = isShooterReadyStableFixed() || isReadyLatched();
+                boolean tagSeenNow = shooterSys.isTagSeen();
+                boolean readyStable = shooterSys.isShooterReadyStable();
+                boolean timeoutNoTag = shootGateTimer.seconds() >= NO_TAG_START_TIMEOUT_SEC;
+                boolean okToStart = (tagSeenNow && readyStable) || isReadyLatched() || (timeoutNoTag && readyStable);
 
                 if (!startedVolleyStart) loader.hold();
 
-                if (!startedVolleyStart && okToStart) {
+                if (!startedVolleyStart && shooterSys.isEnabled() && okToStart) {
                     startedVolleyStart = true;
                     finishedVolleyStart = false;
+                    shooterSys.resetReadyStable();
                     loader.startFourShot();
                 }
 
                 if (startedVolleyStart && !finishedVolleyStart) {
-                    loader.updateFourShot(isShooterReadyStableFixed());
+                    loader.updateFourShot(shooterSys.isShooterReadyStable());
 
                     if (!volleyAssistActive && loader.getState() == LoaderSubsystem.SeqState.SHOT1_RECOVER) {
                         setVolleyAssist(true);
@@ -467,14 +421,10 @@ public class RedAutoFarRange extends OpMode {
                 break;
             }
 
-            // ======================================================
-            // First reload: ADD 0.25s wait after reaching reload start
-            // ======================================================
             case DRIVE_3RDSHOT_TO_3RDRELOADSTART:
                 if (follower.isBusy()) {
                     intake.setEnabled(true);
                 } else {
-                    // NEW: wait 0.25 sec at reload start before sweeping
                     pathTimer.resetTimer();
                     setPathState(PathState.WAIT_AT_RELOAD1_START);
                 }
@@ -509,8 +459,6 @@ public class RedAutoFarRange extends OpMode {
                 if (pathTimer.getElapsedTimeSeconds() >= RELOAD_DECOMPRESS_SEC) {
                     loader.hold();
 
-                    startShooterHold1440();
-
                     follower.followPath(_1stReloadToShootPos, true);
                     resetReadyLatch();
 
@@ -524,6 +472,9 @@ public class RedAutoFarRange extends OpMode {
                 break;
 
             case DRIVE_1STRELOAD_TO_SHOOTPOS:
+                shooterSys.update();
+                startTurretSettle(getAutoAimTurretCmd());
+
                 if (follower.isBusy()) {
                     updateReadyLatchNear(shootPose);
                     intake.setEnabled(false);
@@ -537,13 +488,16 @@ public class RedAutoFarRange extends OpMode {
                 break;
 
             case END_LOAD_AT_SHOOT_POS: {
+                shooterSys.update();
+                startTurretSettle(getAutoAimTurretCmd());
+
                 if (!isTurretSettled()) {
                     if (!volleyAssistActive) intake.setEnabled(false);
                     loader.hold();
                     break;
                 }
 
-                boolean readyEL = isShooterReadyStableFixed();
+                boolean readyEL = shooterSys.isShooterReadyStable();
 
                 if (!endLoadStarted) {
                     endLoadStarted = true;
@@ -567,6 +521,7 @@ public class RedAutoFarRange extends OpMode {
                     loader.decompress();
                     if (!volleyAssistActive) intake.setEnabled(false);
 
+                    shooterSys.resetReadyStable();
                     startedVolley1 = false;
                     finishedVolley1 = false;
 
@@ -576,11 +531,12 @@ public class RedAutoFarRange extends OpMode {
             }
 
             case SHOOT_VOLLEY_1: {
+                shooterSys.update();
+                startTurretSettle(getAutoAimTurretCmd());
+
                 if (finishedVolley1) {
                     setVolleyAssist(false);
                     loader.stopAll();
-
-                    stopShooterHold();
 
                     follower.followPath(_ShotTo2ndReload, true);
                     intake.setEnabled(true);
@@ -593,18 +549,22 @@ public class RedAutoFarRange extends OpMode {
                     break;
                 }
 
-                boolean okToStartV1 = isShooterReadyStableFixed() || isReadyLatched();
+                boolean tagSeenNow = shooterSys.isTagSeen();
+                boolean readyStable = shooterSys.isShooterReadyStable();
+                boolean timeoutNoTag = shootGateTimer.seconds() >= NO_TAG_START_TIMEOUT_SEC;
+                boolean okToStart = (tagSeenNow && readyStable) || isReadyLatched() || (timeoutNoTag && readyStable);
 
                 if (!startedVolley1) loader.hold();
 
-                if (!startedVolley1 && okToStartV1) {
+                if (!startedVolley1 && shooterSys.isEnabled() && okToStart) {
                     startedVolley1 = true;
                     finishedVolley1 = false;
+                    shooterSys.resetReadyStable();
                     loader.startFourShot();
                 }
 
                 if (startedVolley1 && !finishedVolley1) {
-                    loader.updateFourShot(isShooterReadyStableFixed());
+                    loader.updateFourShot(shooterSys.isShooterReadyStable());
 
                     if (!volleyAssistActive && loader.getState() == LoaderSubsystem.SeqState.SHOT1_RECOVER) {
                         setVolleyAssist(true);
@@ -615,14 +575,10 @@ public class RedAutoFarRange extends OpMode {
                 break;
             }
 
-            // ======================================================
-            // Second reload: ADD 0.25s wait at reload start
-            // ======================================================
             case DRIVE_SHOT_TO_2NDRELOAD_START:
                 if (follower.isBusy()) {
                     intake.setEnabled(true);
                 } else {
-                    // NEW: wait 0.25 sec at reload start before starting sweep
                     pathTimer.resetTimer();
                     setPathState(PathState.WAIT_AT_RELOAD2_START);
                 }
@@ -667,9 +623,6 @@ public class RedAutoFarRange extends OpMode {
                 if (pathTimer.getElapsedTimeSeconds() >= RELOAD_DECOMPRESS_SEC) {
                     loader.hold();
 
-                    startShooterHold1440();
-
-                    // IMPORTANT: drive back to shooter position after sweep
                     follower.followPath(_2ndReloadToShootPose, true);
                     resetReadyLatch();
 
@@ -683,6 +636,9 @@ public class RedAutoFarRange extends OpMode {
                 break;
 
             case DRIVE_2NDRELOAD_TO_SHOOTPOSE:
+                shooterSys.update();
+                startTurretSettle(getAutoAimTurretCmd());
+
                 if (follower.isBusy()) {
                     intake.setEnabled(false);
                     loader.hold();
@@ -696,13 +652,16 @@ public class RedAutoFarRange extends OpMode {
                 break;
 
             case END_LOAD_AT_SHOOT_POS_2: {
+                shooterSys.update();
+                startTurretSettle(getAutoAimTurretCmd());
+
                 if (!isTurretSettled()) {
                     if (!volleyAssistActive) intake.setEnabled(false);
                     loader.hold();
                     break;
                 }
 
-                boolean readyEL2 = isShooterReadyStableFixed();
+                boolean readyEL2 = shooterSys.isShooterReadyStable();
 
                 if (!endLoadStarted2) {
                     endLoadStarted2 = true;
@@ -726,6 +685,7 @@ public class RedAutoFarRange extends OpMode {
                     loader.decompress();
                     if (!volleyAssistActive) intake.setEnabled(false);
 
+                    shooterSys.resetReadyStable();
                     startedVolley2 = false;
                     finishedVolley2 = false;
 
@@ -735,12 +695,16 @@ public class RedAutoFarRange extends OpMode {
             }
 
             case SHOOT_VOLLEY_2: {
+                shooterSys.update();
+                startTurretSettle(getAutoAimTurretCmd());
+
                 if (finishedVolley2) {
                     startTurretSettle(0.5);
                     setVolleyAssist(false);
                     loader.stopAll();
-                    stopShooterHold();
-                    setPathState(PathState.DONE);
+
+                    follower.followPath(driveOffLine, true);
+                    setPathState(PathState.FINAL_SHOT_TO_ENDPOSE);
                     break;
                 }
 
@@ -749,18 +713,22 @@ public class RedAutoFarRange extends OpMode {
                     break;
                 }
 
-                boolean okToStartV2 = isShooterReadyStableFixed() || isReadyLatched();
+                boolean tagSeenNow = shooterSys.isTagSeen();
+                boolean readyStable = shooterSys.isShooterReadyStable();
+                boolean timeoutNoTag = shootGateTimer.seconds() >= NO_TAG_START_TIMEOUT_SEC;
+                boolean okToStart = (tagSeenNow && readyStable) || isReadyLatched() || (timeoutNoTag && readyStable);
 
                 if (!startedVolley2) loader.hold();
 
-                if (!startedVolley2 && okToStartV2) {
+                if (!startedVolley2 && shooterSys.isEnabled() && okToStart) {
                     startedVolley2 = true;
                     finishedVolley2 = false;
+                    shooterSys.resetReadyStable();
                     loader.startFourShot();
                 }
 
                 if (startedVolley2 && !finishedVolley2) {
-                    loader.updateFourShot(isShooterReadyStableFixed());
+                    loader.updateFourShot(shooterSys.isShooterReadyStable());
 
                     if (!volleyAssistActive && loader.getState() == LoaderSubsystem.SeqState.SHOT1_RECOVER) {
                         setVolleyAssist(true);
@@ -771,8 +739,16 @@ public class RedAutoFarRange extends OpMode {
                 break;
             }
 
+            case FINAL_SHOT_TO_ENDPOSE:
+                if (!follower.isBusy()) {
+                    setPathState(PathState.DONE);
+                }
+                break;
+
             case DONE:
+                // final stationary; keep turret calm and seed pose once more
                 startTurretSettle(0.5);
+                writePoseStorageNow();
                 break;
 
             default:
@@ -784,22 +760,18 @@ public class RedAutoFarRange extends OpMode {
     public void setPathState(PathState newState) {
         pathState = newState;
         pathTimer.resetTimer();
+        shootGateTimer.reset();
     }
 
     @Override
     public void init() {
-        // NEW: Start by driving to shootPose after start is pressed
         pathState = PathState.DRIVE_START_TO_SHOOTPOSE;
 
         pathTimer = new Timer();
         opModeTimer = new Timer();
         follower = Constants.createFollower(hardwareMap);
 
-        try {
-            limelight = hardwareMap.get(Limelight3A.class, LIMELIGHT_NAME);
-        } catch (Exception e) {
-            limelight = null;
-        }
+        limelight = hardwareMap.get(Limelight3A.class, LIMELIGHT_NAME);
 
         shooter = hardwareMap.get(DcMotorEx.class, SHOOTER_NAME);
         flicker = hardwareMap.get(DcMotorEx.class, FLICKER_NAME);
@@ -811,8 +783,7 @@ public class RedAutoFarRange extends OpMode {
         turretLeft  = hardwareMap.get(Servo.class, TURRET_LEFT_NAME);
         turretRight = hardwareMap.get(Servo.class, TURRET_RIGHT_NAME);
 
-        // IMPORTANT: turret should not move in INIT
-        // applyTurret(TURRET_START_POS);
+        // ===== NO SERVO MOVEMENT IN INIT =====
         turretTargetPos = TURRET_START_POS;
         turretSettleStarted = false;
         turretSettleTimer.reset();
@@ -826,18 +797,11 @@ public class RedAutoFarRange extends OpMode {
         visionLastGoodTimer.reset();
         visionDecayTimer.reset();
 
-        // ==========================================================
-        // CHANGE: prevent ANY actuator motion in INIT by not commanding
-        // hood/flipper here. They will be commanded at START instead.
-        // ==========================================================
-        // flipper.setPosition(0.662);
-        // hood.setPosition(FIXED_HOOD_POS);
-
         shooter.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
-        PIDFCoefficients pidf = new PIDFCoefficients(265, 0, 0, 16.53);
+        PIDFCoefficients pidf = new PIDFCoefficients(180, 0, 0, 15.5022);
         shooter.setPIDFCoefficients(DcMotor.RunMode.RUN_USING_ENCODER, pidf);
 
-        intake = new IntakeSubsystem(intake1, -0.8, -1.0);
+        intake = new IntakeSubsystem(intake1, -1.0, -1.0);
         intake.setEnabled(false);
 
         loader = new LoaderSubsystem(
@@ -849,7 +813,24 @@ public class RedAutoFarRange extends OpMode {
                 120
         );
 
-        stopShooterHold();
+        // ===== ShooterSubsystem (same operating model as CloseRange12BallOdo) =====
+        shooterSys = new ShooterSubsystem(
+                limelight, shooter, hood,
+                0,
+                -1, 24,
+                8.0,
+                180, 15.5022,
+                new double[]{16, 32, 48, 64, 80, 120},
+                new double[]{0.310, 0.530, 0.730, 0.750, 0.780, 0.790},
+                new double[]{1020, 1045, 1110, 1180, 1260, 1480},
+                new double[]{1040, 1060, 1120, 1200, 1280, 1490},
+                new double[]{1050, 1070, 1130, 1210, 1300, 1550},
+                110
+        );
+
+
+        shooterSys.startVision();
+        shooterSys.setEnabled(false); // no motion in init
 
         endLoadStartedStart = false;
         startedVolleyStart = false;
@@ -873,7 +854,7 @@ public class RedAutoFarRange extends OpMode {
 
         setVolleyAssist(false);
 
-        allowTurretMotion = false;
+        didStartCommands = false;
 
         telemetry.addLine("Ready. Waiting for start.");
         telemetry.update();
@@ -882,26 +863,21 @@ public class RedAutoFarRange extends OpMode {
     @Override
     public void start() {
         opModeTimer.resetTimer();
-
-        // CHANGE: now that START is pressed, command hood/flipper positions
-        flipper.setPosition(0.662);
-        hood.setPosition(FIXED_HOOD_POS);
-
-        // motor revs immediately once start is pressed
-        startShooterHold1440();
-
-        // turret starts moving only after START
-        allowTurretMotion = true;
-        turretSettleStarted = false;
-        turretSettleTimer.reset();
-
-        // NEW: command turret start position ONLY at START (no motion in INIT)
-        applyTurret(TURRET_START_POS);
-        turretTargetPos = TURRET_START_POS;
-        lastTurretCmd = clamp(TURRET_START_POS, SERVO_MIN_SAFE, SERVO_MAX_SAFE);
-
-        // Begin the state machine (drive out first)
         setPathState(pathState);
+
+        if (!didStartCommands) {
+            applyTurret(TURRET_START_POS);
+            turretTargetPos = TURRET_START_POS;
+            turretSettleStarted = false;
+            turretSettleTimer.reset();
+
+            flipper.setPosition(0.662);
+
+            // shooter runs from start (and stays on through drive legs)
+            shooterSys.setEnabled(true);
+
+            didStartCommands = true;
+        }
 
         // Kick off the initial path immediately
         follower.followPath(driveStartToShootPose, true);
@@ -911,31 +887,20 @@ public class RedAutoFarRange extends OpMode {
     public void loop() {
         follower.update();
 
-        // CHANGE: auto-aim ONLY during shooting states (prevents wiggle while driving/reloading)
-        boolean shootingState =
-                pathState == PathState.END_LOAD_AT_START || pathState == PathState.SHOOT_VOLLEY_START ||
-                        pathState == PathState.END_LOAD_AT_SHOOT_POS || pathState == PathState.SHOOT_VOLLEY_1 ||
-                        pathState == PathState.END_LOAD_AT_SHOOT_POS_2 || pathState == PathState.SHOOT_VOLLEY_2;
+        // ===== Option B: feed odometry distance to shooter (vision used when available; odom when not) =====
+        shooterSys.setExternalDistanceIn(getAutoAimShooterDistanceIn());
 
-        // turret + vision ONLY after start AND only while shooting
-        if (allowTurretMotion && shootingState) {
-            updateVisionTrim();
-            startTurretSettle(getAutoAimTurretCmd());
-        }
+        shooterSys.update();
 
-        // maintain shooter hold if active (rev stays up while not reloading)
-        if (shooterHoldActive && shooter != null) shooter.setVelocity(SHOOT_VEL_TGT); // CHANGE #2
+        updateVisionTrim();
 
-        // PoseStorage seeding (Pedro -> FTC)
         Pose p = follower.getPose();
         double pedroX = p.getX();
         double pedroY = p.getY();
         double pedroHeadingDeg = Math.toDegrees(p.getHeading());
 
-        PoseStorage.valid = true;
-        PoseStorage.xIn = pedroToFtcX(pedroY);
-        PoseStorage.yIn = pedroToFtcY(pedroX);
-        PoseStorage.headingDeg = wrapDeg180(pedroHeadingDeg + PEDRO_TO_FTC_HEADING_OFFSET_DEG);
+        // ===== single source of truth for Pedro -> FTC PoseStorage seeding =====
+        FieldTransform.writePoseStorageFromPedro(pedroX, pedroY, pedroHeadingDeg);
 
         statePathUpdate();
 
@@ -946,11 +911,6 @@ public class RedAutoFarRange extends OpMode {
 
         telemetry.addData("turret target", "%.3f", turretTargetPos);
         telemetry.addData("turret settled", isTurretSettled());
-        telemetry.addData("TurretEnabled", allowTurretMotion);
-
-        telemetry.addData("ShooterHold", shooterHoldActive);
-        telemetry.addData("ShooterVel", shooter != null ? shooter.getVelocity() : 0.0);
-        telemetry.addData("ShooterReadyStable", isShooterReadyStableFixed());
 
         telemetry.addData("Goal(Pedro)", "(%.2f, %.2f)", RED_GOAL_PX, RED_GOAL_PY);
         telemetry.addData("Vision TagSeen", tagSeen);
@@ -959,12 +919,20 @@ public class RedAutoFarRange extends OpMode {
         telemetry.addData("TrimRaw CW(deg)", "%.2f", visionTrimDegCW_raw);
         telemetry.addData("TrimFilt CW(deg)", "%.2f", visionTrimDegCW);
 
-        telemetry.addData("VolleyAssist", volleyAssistActive);
+        telemetry.addData("Seed FTC X(in)", "%.2f", PoseStorage.xIn);
+        telemetry.addData("Seed FTC Y(in)", "%.2f", PoseStorage.yIn);
+        telemetry.addData("Seed FTC H(deg)", "%.1f", PoseStorage.headingDeg);
 
-        // CHANGE #1: turret cmd telemetry DURING SHOOTING
-        if (shootingState) {
-            telemetry.addData("TurretCmd(applied)", "%.4f", lastTurretCmd);
-        }
+        telemetry.addData("VolleyAssist", volleyAssistActive);
+        telemetry.addData("Shooter TagSeen", shooterSys.isTagSeen());
+        telemetry.addData("Shooter Dist(in)", "%.2f", shooterSys.getShooterDistanceIn());
+        telemetry.addData("Shooter RPM Tgt", "%.0f", shooterSys.getRpmTargetCmd());
+        telemetry.addData("Shooter HoodCmd", "%.3f", shooterSys.getHoodCmd());
+    }
+
+    @Override
+    public void stop() {
+        writePoseStorageNow();
     }
 
     // ======= TURRET HELPERS =======
@@ -989,13 +957,11 @@ public class RedAutoFarRange extends OpMode {
     }
 
     private boolean isTurretSettled() {
-        // if turret is not enabled yet, treat it as "settled" so it doesn't block init states
-        if (!allowTurretMotion) return true;
         return turretSettleStarted && turretSettleTimer.seconds() >= TURRET_SETTLE_SEC;
     }
 
     // ==========================================================
-    // Ready latch helpers (RPM-based)
+    // Ready latch helpers (matches CloseRange: must be READY + TAG near shot pose)
     // ==========================================================
     private void resetReadyLatch() {
         readyLatched = false;
@@ -1015,10 +981,34 @@ public class RedAutoFarRange extends OpMode {
     private void updateReadyLatchNear(Pose shotPoseRef) {
         if (dist(follower.getPose(), shotPoseRef) > PRECHECK_DIST_IN) return;
 
-        if (isShooterReadyStableFixed()) {
+        boolean ready = shooterSys.isShooterReadyStable();
+        boolean tag = shooterSys.isTagSeen();
+
+        if (ready && tag) {
             readyLatched = true;
             readyLatchTimer.reset();
         }
+    }
+
+    // ==========================================================
+    // AutoAim shooter distance from Pedro pose (matches turret reference point)
+    // ==========================================================
+    private double getAutoAimShooterDistanceIn() {
+        Pose pose = follower.getPose();
+        double robotX = pose.getX();
+        double robotY = pose.getY();
+        double headingRad = pose.getHeading();
+
+        double fwdX = Math.cos(headingRad);
+        double fwdY = Math.sin(headingRad);
+
+        double leftX = -Math.sin(headingRad);
+        double leftY =  Math.cos(headingRad);
+
+        double turretX = robotX + fwdX * TURRET_FWD_OFFSET_IN + leftX * TURRET_LEFT_OFFSET_IN;
+        double turretY = robotY + fwdY * TURRET_FWD_OFFSET_IN + leftY * TURRET_LEFT_OFFSET_IN;
+
+        return Math.hypot(RED_GOAL_PX - turretX, RED_GOAL_PY - turretY);
     }
 
     // ==========================================================
@@ -1051,7 +1041,6 @@ public class RedAutoFarRange extends OpMode {
         double relDegCCW = wrapDeg180(bearingDegField - headingDeg);
         double turretDegCW_odo = -relDegCCW;
 
-        // CHANGE: apply bias back toward home
         double turretDegCW_total = wrapDeg180(turretDegCW_odo + visionTrimDegCW + TURRET_BIAS_DEG_CW);
 
         double turretCmdTarget = TURRET_HOME + turretDegCW_total * POS_PER_DEG_CW;
@@ -1077,7 +1066,7 @@ public class RedAutoFarRange extends OpMode {
     }
 
     // ==========================================================
-    // Vision trim update (camera optional)  (RED TAG 24 ONLY)
+    // Vision trim update (RED TAG 24 ONLY)
     // ==========================================================
     private void updateVisionTrim() {
         tagSeen = false;
