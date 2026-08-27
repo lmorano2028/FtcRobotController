@@ -8,11 +8,12 @@ import com.pedropathing.paths.PathChain;
 
 import com.qualcomm.robotcore.eventloop.opmode.Autonomous;
 import com.pedropathing.util.Timer;
+import com.qualcomm.robotcore.eventloop.opmode.Disabled;
 import com.qualcomm.robotcore.eventloop.opmode.OpMode;
 
 import org.firstinspires.ftc.teamcode.pedroPathing.subsystems.Constants;
 import org.firstinspires.ftc.teamcode.pedroPathing.subsystems.FieldTransform;
-
+@Disabled
 @Autonomous(name = "BlueAuto_PathOnly_15Ball_gateReload", group = "Blue")
 public class BlueAutoCloseRange15Ball_PathOnly extends OpMode {
 

@@ -130,7 +130,7 @@ public class RedAutoFarRange extends OpMode {
     private final Pose shootPose = new Pose(89.000, 15.000, Math.toRadians(25));
 
     private final Pose firstReloadStart = new Pose(103.000, 35.000, Math.toRadians(0));
-    private final Pose firstReloadEnd   = new Pose(125.0,   35.0,  Math.toRadians(0));
+    private final Pose firstReloadEnd   = new Pose(126.0,   35.0,  Math.toRadians(0));
 
     private final Pose endPose = new Pose(92, 35, Math.toRadians(90));
 
@@ -192,6 +192,11 @@ public class RedAutoFarRange extends OpMode {
     // ======= NEW: no init movement; do first servo+enable commands in start() only =======
     private boolean didStartCommands = false;
 
+    // ======= END-OF-AUTO FAILSAFE =======
+    private static final double AUTO_TOTAL_SEC = 30.0;
+    private static final double FORCE_END_WITH_SEC_LEFT = 3.0;   // "at 3 seconds left"
+    private boolean forcedEndStarted = false;
+
     // ==========================================================
     // States (UNCHANGED)
     // ==========================================================
@@ -244,6 +249,23 @@ public class RedAutoFarRange extends OpMode {
         );
     }
 
+    private void forceGoToEndPoseNow() {
+        if (forcedEndStarted) return;
+        forcedEndStarted = true;
+
+        // Stop mechanisms so we don't waste time / deadlock on sequencing
+        try { setVolleyAssist(false); } catch (Exception ignored) {}
+        try { loader.stopAll(); } catch (Exception ignored) {}
+        try { intake.setEnabled(false); } catch (Exception ignored) {}
+
+        // Keep turret calm (optional)
+        try { startTurretSettle(0.5); } catch (Exception ignored) {}
+
+        // Interrupt current motion and go to end pose NOW
+        follower.followPath(driveOffLine, true);
+        setPathState(PathState.FINAL_SHOT_TO_ENDPOSE);
+    }
+
     // ==========================================================
     // Paths (UNCHANGED)
     // ==========================================================
@@ -270,22 +292,22 @@ public class RedAutoFarRange extends OpMode {
                 .build();
 
         _ShotTo2ndReload = follower.pathBuilder().addPath(
-                        new BezierLine(shootPose, new Pose(131.000, 15.000))
+                        new BezierLine(shootPose, new Pose(133.000, 15.000))
                 ).setLinearHeadingInterpolation(shootPose.getHeading(), Math.toRadians(0))
                 .build();
 
         _2ndReloadAgain = follower.pathBuilder().addPath(
-                        new BezierLine(new Pose(131.000, 15.000), new Pose(124.000, 11.000))
+                        new BezierLine(new Pose(133.000, 15.000), new Pose(126.000, 11.000))
                 ).setLinearHeadingInterpolation(Math.toRadians(0), Math.toRadians(0))
                 .build();
 
         _2ndReloadFinalRound = follower.pathBuilder().addPath(
-                        new BezierLine(new Pose(124.000, 11.000), new Pose(131.000, 11.000))
+                        new BezierLine(new Pose(126.000, 11.000), new Pose(133.000, 11.000))
                 ).setTangentHeadingInterpolation()
                 .build();
 
         _2ndReloadToShootPose = follower.pathBuilder().addPath(
-                        new BezierLine(new Pose(131.000, 11.000), shootPose)
+                        new BezierLine(new Pose(133.000, 11.000), shootPose)
                 ).setLinearHeadingInterpolation(Math.toRadians(0), shootPose.getHeading())
                 .build();
 
@@ -865,6 +887,8 @@ public class RedAutoFarRange extends OpMode {
         opModeTimer.resetTimer();
         setPathState(pathState);
 
+        forcedEndStarted = false;
+
         if (!didStartCommands) {
             applyTurret(TURRET_START_POS);
             turretTargetPos = TURRET_START_POS;
@@ -886,6 +910,18 @@ public class RedAutoFarRange extends OpMode {
     @Override
     public void loop() {
         follower.update();
+
+        // ======= FORCE ENDPOSE WITH 3s LEFT =======
+        double t = opModeTimer.getElapsedTimeSeconds();
+        double timeLeft = AUTO_TOTAL_SEC - t;
+
+        // If we're inside the last 3 seconds and NOT already ending, cut over immediately
+        if (!forcedEndStarted
+                && timeLeft <= FORCE_END_WITH_SEC_LEFT
+                && pathState != PathState.FINAL_SHOT_TO_ENDPOSE
+                && pathState != PathState.DONE) {
+            forceGoToEndPoseNow();
+        }
 
         // ===== Option B: feed odometry distance to shooter (vision used when available; odom when not) =====
         shooterSys.setExternalDistanceIn(getAutoAimShooterDistanceIn());

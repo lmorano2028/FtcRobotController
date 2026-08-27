@@ -20,11 +20,13 @@ import com.qualcomm.robotcore.hardware.DigitalChannel;
 import com.qualcomm.robotcore.util.ElapsedTime;
 
 import org.firstinspires.ftc.robotcore.external.navigation.DistanceUnit;
+import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
 import org.firstinspires.ftc.robotcore.external.navigation.Pose2D;
 import org.firstinspires.ftc.robotcore.external.navigation.Pose3D;
 import org.firstinspires.ftc.robotcore.external.navigation.Position;
 
 import org.firstinspires.ftc.teamcode.pedroPathing.subsystems.GoBildaPinpointDriver;
+import org.firstinspires.ftc.teamcode.pedroPathing.subsystems.LoaderSubsystem;
 import org.firstinspires.ftc.teamcode.pedroPathing.subsystems.PoseStorage;
 import org.firstinspires.ftc.teamcode.pedroPathing.subsystems.FieldTransform;
 
@@ -38,9 +40,15 @@ import java.util.List;
  *      * intake1 at full power (INTAKE1_PWR)
  *      * intake2 at 0.2 power (INTAKE2_PWR_ON_A)
  *
+ * NEW CHANGE (THIS EDIT):
+ *  - dpad_up (edge-detected) forces odometry pose to (0,0,90deg)
+ *
+ * NEW CHANGE (THIS EDIT):
+ *  - REMOVED HOOD ARC BOOST (no timed hood delta during throughput sequence)
+ *
  * Everything else unchanged.
  */
-@TeleOp(name="TestThroughPutTeleOp", group="Tele-Master")
+@TeleOp(name="Law Tele-op", group="Tele-Master")
 public class TestThroughputTeleOp extends OpMode {
 
     // ======= DRIVE CONFIG NAMES =======
@@ -92,9 +100,9 @@ public class TestThroughputTeleOp extends OpMode {
     // ======= SHOT MAP TABLE (YOUR VALUES) =======
     private static final double[] DIST_IN  = { 16, 32, 48, 64, 80, 120 };
     private static final double[] HOOD_POS = { 0.310, 0.530, 0.730, 0.750, 0.780, 0.790 };
-    private static final double[] RPM_MIN  = { 1020, 1045, 1140, 1210, 1260, 1440 };
-    private static final double[] RPM_TGT  = { 1040, 1060, 1150, 1230, 1280, 1470 };
-    private static final double[] RPM_MAX  = { 1050, 1070, 1160, 1250, 1300, 1500 };
+    private static final double[] RPM_MIN  = { 1020, 1045, 1140, 1220, 1260, 1490 };
+    private static final double[] RPM_TGT  = { 1040, 1060, 1155, 1230, 1280, 1500 };
+    private static final double[] RPM_MAX  = { 1050, 1090, 1170, 1250, 1300, 1550 };
 
     // ======= HARDWARE =======
     private DcMotor driveFR, driveFL, driveBR, driveBL;
@@ -143,18 +151,15 @@ public class TestThroughputTeleOp extends OpMode {
     // Timer for entire sequence since X press (does NOT reset until sequence ends)
     private final ElapsedTime throughputSeqTimer = new ElapsedTime();
 
-    // ======= HOOD ARC BOOST (Throughput) =======
-    // On your robot: LOWER servo value = MORE arc (higher shot)
-    private static final double HOOD_ARC_BOOST_DELAY_SEC = 0.450; // after 0.450s
-    private static final double HOOD_ARC_BOOST_DELTA     = -0.06; // decrease hood value slightly
-    private boolean hoodArcBoostActive = false;
-
     // ======= READY STABLE (NEW: 40ms latch) =======
     private static final int READY_STABLE_MS = 40;
     private final ElapsedTime readyStableTimer = new ElapsedTime();
     private boolean shooterReadyLatched = false;
 
     // ======= LATCHES =======
+    private LoaderSubsystem loader;
+    private boolean dpadRightLast = false;
+    private boolean teleVolleyActive = false;
     private boolean intake1Enabled = false;
     private boolean intake2Enabled = false; // kept for compatibility, but A now drives intake2 at 0.2 when enabled
     private boolean shooterEnabled = false;
@@ -165,6 +170,7 @@ public class TestThroughputTeleOp extends OpMode {
     // Edge detection
     private boolean prevA=false, prevB=false, prevX=false, prevY=false;
     private boolean prevDpadDown=false;
+    private boolean prevDpadUp=false;
     private boolean prevRB=false;
 
     // ======= IR LIGHT FLASH STATE =======
@@ -345,10 +351,28 @@ public class TestThroughputTeleOp extends OpMode {
     private boolean poseStorageWasValidInInit = false;
 
     // =========================================================
-    // HOOD helper (applies optional arc boost)
+    // FORCE ODO POSE (Pinpoint) from FTC inches + FTC heading deg
     // =========================================================
-    private void setHoodWithOptionalBoost(double baseHoodCmd) {
-        double cmd = baseHoodCmd + (hoodArcBoostActive ? HOOD_ARC_BOOST_DELTA : 0.0);
+    private void forcePoseFtcIn(double xInFtc, double yInFtc, double headingDegFtc) {
+        // Pinpoint Pose2D uses DistanceUnit.MM here
+        double xMm = xInFtc * 25.4;
+        double yMm = yInFtc * 25.4;
+
+        Pose2D newPose = new Pose2D(
+                DistanceUnit.MM, xMm, yMm,
+                AngleUnit.DEGREES, headingDegFtc
+        );
+
+        odo.setPosition(newPose);
+        odo.update();
+
+        // Refresh cache immediately so shot-assist / telemetry see the new pose this loop
+        updateOdoCacheOnce();
+
+        telemetry.addLine("DPAD_UP: Forced Pose -> X=0 Y=0 H=90");
+    }
+
+    private void setHoodCmd(double cmd) {
         cmd = clamp(cmd, 0.0, 1.0);
         hood.setPosition(cmd);
     }
@@ -433,6 +457,23 @@ public class TestThroughputTeleOp extends OpMode {
         visionLastGoodTimer.reset();
         visionDecayTimer.reset();
 
+        loader = new LoaderSubsystem(
+                intake2,
+                flicker,
+                flipper,
+                null,
+                0.662,
+                0.39,
+                0.12,
+                0.05,
+                1.0,
+                1.0,
+                150,
+                -0.15,
+                40,
+                120
+        );
+
         haveLastShotSolution = false;
         lastHoodCmd = hoodCmd;
         lastRpmMinCmd = rpmMinCmd;
@@ -487,7 +528,6 @@ public class TestThroughputTeleOp extends OpMode {
         throughputState = ThroughputState.IDLE;
         throughputTimer.reset();
         throughputSeqTimer.reset();
-        hoodArcBoostActive = false;
 
         shooterReadyLatched = false;
         readyStableTimer.reset();
@@ -497,6 +537,7 @@ public class TestThroughputTeleOp extends OpMode {
         telemetry.addLine("INIT: dpad_left=RED, dpad_right=BLUE");
         telemetry.addLine("Drive: LS translate, RSX rotate");
         telemetry.addLine("dpad_left reset yaw | dpad_down toggle reverse eject");
+        telemetry.addLine("dpad_up FORCE POSE -> (0,0,90)");
         telemetry.addLine("A intake1 toggle (intake2 @ 0.2) | Y shooter toggle | X start ONE-SHOT loading | B STOP loading/intakes");
         telemetry.addLine("RB(toggle) turret autoaim | LB turret home");
         telemetry.addLine("IR: beamIntake -> IRlight GREEN (solid/flash)");
@@ -545,8 +586,7 @@ public class TestThroughputTeleOp extends OpMode {
 
         turretAllianceOffsetDegCW = allianceIsRed ? +TURRET_ALLIANCE_OFFSET_DEG : -TURRET_ALLIANCE_OFFSET_DEG;
 
-        hoodArcBoostActive = false;
-        setHoodWithOptionalBoost(hoodCmd);
+        setHoodCmd(hoodCmd);
 
         flipper.setPosition(FLIP_DOWN);
 
@@ -627,6 +667,9 @@ public class TestThroughputTeleOp extends OpMode {
         boolean dpadDown = gamepad1.dpad_down;
         boolean dpadDownPressed = dpadDown && !prevDpadDown;
 
+        boolean dpadUp = gamepad1.dpad_up;
+        boolean dpadUpPressed = dpadUp && !prevDpadUp;
+
         boolean rb = gamepad1.right_bumper;
         boolean rbPressed = rb && !prevRB;
 
@@ -638,6 +681,11 @@ public class TestThroughputTeleOp extends OpMode {
 
         // ===================== Reverse eject toggle =====================
         if (dpadDownPressed) reverseEjectEnabled = !reverseEjectEnabled;
+
+        // ===================== DPAD_UP = FORCE POSE (0,0,90) =====================
+        if (dpadUpPressed) {
+            forcePoseFtcIn(0.0, 0.0, 90.0);
+        }
 
         // ===================== Intake1 toggle (A) =====================
         if (aPressed) {
@@ -653,6 +701,27 @@ public class TestThroughputTeleOp extends OpMode {
             if (!shooterEnabled) stopShooter();
         }
 
+        // ========================= far range shot( dpad right)
+        boolean dpadRightNow = gamepad1.dpad_right;
+        boolean dpadRightPressed = dpadRightNow && !dpadRightLast;
+
+        if (dpadRightPressed && !teleVolleyActive && loader.isIdle()) {
+            teleVolleyActive = true;
+            resetReadyStable();
+            loader.startFourShot();
+        }
+
+        dpadRightLast = dpadRightNow;
+
+        if (teleVolleyActive) {
+            loader.updateFourShot(isShooterReadyStable());
+
+            if (loader.getState() == LoaderSubsystem.SeqState.DONE || loader.isIdle()) {
+                teleVolleyActive = false;
+                loader.stopAll();
+            }
+        }
+
         // ===================== X = START ONE-SHOT LOADING SEQUENCE =====================
         if (xPressed) {
             reverseEjectEnabled = false;
@@ -666,31 +735,44 @@ public class TestThroughputTeleOp extends OpMode {
 
         // ===================== B = STOP LOADING SEQUENCE + FEED MOTORS =====================
         if (bPressed) {
+
+            // Kill ALL loading systems
             throughputState = ThroughputState.IDLE;
+            teleVolleyActive = false;
             reverseEjectEnabled = false;
+
+            // Stop loader sequence
+            if (loader != null) {
+                loader.stopAll();
+            }
+
+            // Stop motors
             stopAllFeedAndFlipperDown();
+
+            // Reset readiness so volley doesn't auto-resume
+            shooterReadyLatched = false;
+            resetReadyStable();
         }
 
         boolean throughputActive = (throughputState != ThroughputState.IDLE);
 
-        // ===================== HOOD ARC BOOST LOGIC =====================
-        // Based on total time since X press (does NOT reset during state transitions)
-        if (throughputActive) {
-            hoodArcBoostActive = (throughputSeqTimer.seconds() >= HOOD_ARC_BOOST_DELAY_SEC);
-        } else {
-            hoodArcBoostActive = false;
-        }
-
         // ===================== Motor power application =====================
-        if (reverseEjectEnabled && !throughputActive) {
+        if (reverseEjectEnabled && !throughputActive && !teleVolleyActive) {
+
             intake1.setPower(EJECT_PWR);
             intake2.setPower(EJECT_PWR);
             flicker.setPower(0.0);
             flipper.setPosition(FLIP_DOWN);
 
+        } else if (teleVolleyActive) {
+
+            // Let loader control intake2 + flicker internally
+            // Only drive intake1 here
+            intake1.setPower(INTAKE1_PWR);
+
         } else if (throughputActive) {
 
-            // Always run feed motors while sequence is active
+            // Existing X-button sequence (UNCHANGED)
             intake1.setPower(THR_INTAKE1_PWR);
             intake2.setPower(THR_INTAKE2_PWR);
             flicker.setPower(THR_FLICKER_PWR);
@@ -730,9 +812,9 @@ public class TestThroughputTeleOp extends OpMode {
             }
 
         } else {
-            // Normal mode
+
+            // Normal driving intake behavior
             intake1.setPower(intake1Enabled ? INTAKE1_PWR : 0.0);
-            // >>> NEW: when A is enabled, intake2 runs at 0.2 power
             intake2.setPower(intake1Enabled ? INTAKE2_PWR_ON_A : 0.0);
 
             flicker.setPower(0.0);
@@ -747,10 +829,9 @@ public class TestThroughputTeleOp extends OpMode {
         }
 
         // ===================== SHOOTERLIGHT =====================
-        // Purple NOT implemented.
         // Blue when throughputActive, else orange when READY, else off.
         boolean readyNow = isShooterReadyStable();
-        if (throughputActive) {
+        if (throughputActive || teleVolleyActive) {
             shooterlight.setPosition(LIGHT_BLUE);
         } else {
             shooterlight.setPosition(readyNow ? LIGHT_ORANGE : LIGHT_OFF);
@@ -781,9 +862,8 @@ public class TestThroughputTeleOp extends OpMode {
         telemetry.addData("LoadState(X)", throughputState);
         telemetry.addData("StateTimer(s)", "%.2f", throughputTimer.seconds());
         telemetry.addData("SeqTimer(s)", "%.2f", throughputSeqTimer.seconds());
-        telemetry.addData("ArcBoostActive", hoodArcBoostActive);
         telemetry.addData("Intake1Enabled(A)", intake1Enabled);
-        telemetry.addData("Intake2(A@0.2)", intake1Enabled);
+        telemetry.addData("Intake2(A@0.15)", intake1Enabled);
         telemetry.addData("ReverseEject(dpad_down)", reverseEjectEnabled);
 
         telemetry.addLine("--- Shooter ---");
@@ -811,6 +891,7 @@ public class TestThroughputTeleOp extends OpMode {
         // ===================== Save prev =====================
         prevA=a; prevB=b; prevX=xBtn; prevY=yBtn;
         prevDpadDown = dpadDown;
+        prevDpadUp = dpadUp;
         prevRB = rb;
     }
 
@@ -881,7 +962,7 @@ public class TestThroughputTeleOp extends OpMode {
     }
 
     // =========================================================
-    // ShotAssist (unchanged except hood command calls -> setHoodWithOptionalBoost)
+    // ShotAssist (unchanged except hood command calls -> setHoodCmd)
     // =========================================================
     private void updateFromLimelightAndComputeShot_HoldLast(LLResult result) {
         boolean gotNewSolution = false;
@@ -965,7 +1046,7 @@ public class TestThroughputTeleOp extends OpMode {
                                 haveLastShotSolution = true;
                                 gotNewSolution = true;
 
-                                if (teleopStarted) setHoodWithOptionalBoost(lastHoodCmd);
+                                if (teleopStarted) setHoodCmd(lastHoodCmd);
                                 return;
                             }
                         }
@@ -1017,7 +1098,7 @@ public class TestThroughputTeleOp extends OpMode {
             haveLastShotSolution = true;
             gotNewSolution = true;
 
-            if (teleopStarted) setHoodWithOptionalBoost(lastHoodCmd);
+            if (teleopStarted) setHoodCmd(lastHoodCmd);
         }
 
         if (!gotNewSolution && haveLastShotSolution) {
@@ -1027,13 +1108,13 @@ public class TestThroughputTeleOp extends OpMode {
             rpmTgtCmd = lastRpmTgtCmd;
             rpmMaxCmd = lastRpmMaxCmd;
 
-            if (teleopStarted) setHoodWithOptionalBoost(lastHoodCmd);
+            if (teleopStarted) setHoodCmd(lastHoodCmd);
         }
 
         if (!haveLastShotSolution) {
             shooterDistIn = Double.NaN;
             hoodCmd = HOOD_POS[0];
-            if (teleopStarted) setHoodWithOptionalBoost(hoodCmd);
+            if (teleopStarted) setHoodCmd(hoodCmd);
             rpmMinCmd = 0;
             rpmTgtCmd = 0;
             rpmMaxCmd = 0;

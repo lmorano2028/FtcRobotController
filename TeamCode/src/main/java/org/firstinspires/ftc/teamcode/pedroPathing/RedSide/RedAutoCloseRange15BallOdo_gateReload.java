@@ -27,7 +27,7 @@ import org.firstinspires.ftc.teamcode.pedroPathing.subsystems.ShooterSubsystem;
 
 import java.util.List;
 
-@Autonomous(name = "RedAutoCloseRange15BallOdo_gateReload", group = "Red")
+@Autonomous(name = "R - 15pt Gate", group = "Red")
 public class RedAutoCloseRange15BallOdo_gateReload extends OpMode {
 
     private Follower follower;
@@ -226,12 +226,12 @@ public class RedAutoCloseRange15BallOdo_gateReload extends OpMode {
             new com.qualcomm.robotcore.util.ElapsedTime();
 
     // Gate position wait after arriving at gate start pose
-    private static final double GATE_POS_WAIT_SEC = 0.15;
+    private static final double GATE_POS_WAIT_SEC = 0.20;
     private final com.qualcomm.robotcore.util.ElapsedTime gatePosWaitTimer =
             new com.qualcomm.robotcore.util.ElapsedTime();
 
     // ==========================================================
-    // PATH STATES (UPDATED ORDER WITH 2ND SHOT + 2ND GATE CYCLE)
+    // PATH STATES
     // ==========================================================
     public enum PathState {
         DRIVE_START_TO_SHOT,
@@ -257,8 +257,11 @@ public class RedAutoCloseRange15BallOdo_gateReload extends OpMode {
         DRIVE_RELOAD1_END_TO_SHOT,
         SHOOT_4,
 
+        // split the B gate approach into two legs for head-on impact
+        DRIVE_SHOT_TO_GATE_MID_B,
+        DRIVE_GATE_MID_TO_GATERELOAD_START_B,
+
         // shot -> gate -> final shot
-        DRIVE_SHOT_TO_GATERELOAD_START_B,
         WAIT_GATEPOS_0P5S_B,
         DRIVE_GATERELOAD_START_TO_RELOAD_B,
         WAIT_GATERELOAD_1P5S_B,
@@ -280,18 +283,26 @@ public class RedAutoCloseRange15BallOdo_gateReload extends OpMode {
     private final Pose reload1Start = new Pose(95.000, 89.000, Math.toRadians(0));
     private final Pose reload1End   = new Pose(122.000, 89.000, Math.toRadians(0));
 
-    private final Pose reload2Start = new Pose(95.000, 66.500, Math.toRadians(0));
-    private final Pose reload2End   = new Pose(119.000, 66.500, Math.toRadians(0));
+    private final Pose reload2Start = new Pose(95.000, 67.00, Math.toRadians(0));
+    private final Pose reload2End   = new Pose(119.000, 67.00, Math.toRadians(0));
 
     // ===== Gate reload points (VARIABLES) =====
-    private final Pose gateReloadStartPose   = new Pose(126.0, 66.75, Math.toRadians(0));
-    private final Pose gateReloadControlPose = new Pose(122.000, 57.000, Math.toRadians(25)); // control point; heading not used
-    private final Pose gateReloadPose        = new Pose(127.750, 56.50, Math.toRadians(47.5));
+    private final Pose gateReloadStartPose     = new Pose(125.50, 66.0, Math.toRadians(0));
+    private final Pose getGateReloadStartPose2 = new Pose(126.25, 67.0,  Math.toRadians(0));
+    private final Pose gateReloadControlPose   = new Pose(122.000, 57.000, Math.toRadians(25)); // control point; heading not used
+    private final Pose gateReloadPose          = new Pose(126.750, 55.0,   Math.toRadians(47.5));
+
+    // NEW: postGateMidPose (after each gateReloadPose and before the shot pose)
+    // Requested coords: x=129.25, y=57, heading=42.5deg
+    private final Pose postGateMidPose         = new Pose(127.0, 56.000, Math.toRadians(42.5));
 
     // control point for shot2 <-> gateReloadStartPose bezier
-    private final Pose shot2ToGateControlPose = new Pose(85.0, 65.0, Math.toRadians(0)); // heading not used
+    private final Pose shot2ToGateControlPose  = new Pose(85.0, 65.0, Math.toRadians(0)); // heading not used
 
-    private final Pose finalShotPose = new Pose(89.000, 104.000, Math.toRadians(90));
+    // midpoint to hit gate head-on (B approach)
+    private final Pose gateMidPose_B           = new Pose(115.000, 67.250, Math.toRadians(0));
+
+    private final Pose finalShotPose           = new Pose(89.000, 104.000, Math.toRadians(90));
 
     // ==========================================================
     // PATHS
@@ -310,7 +321,9 @@ public class RedAutoCloseRange15BallOdo_gateReload extends OpMode {
     private PathChain reload1StartToEnd;
     private PathChain reload1EndToShot;
 
-    private PathChain shotToGateReloadStart_B;
+    private PathChain shotToGateMid_B;
+    private PathChain gateMidToGateReloadStart_B;
+
     private PathChain gateReloadStartToReload_B;
     private PathChain gateReloadToFinalShot;
 
@@ -360,10 +373,7 @@ public class RedAutoCloseRange15BallOdo_gateReload extends OpMode {
                 .setConstantHeadingInterpolation(Math.toRadians(0))
                 .build();
 
-        // ======================================================
-        // secondShotPose -> gateReloadStartPose
-        // BezierCurve through control (85, 65)
-        // ======================================================
+        // secondShotPose -> gateReloadStartPose (BezierCurve through control (85, 65))
         shot2ToGateReloadStart = follower.pathBuilder()
                 .addPath(new BezierCurve(secondShotPose, shot2ToGateControlPose, gateReloadStartPose))
                 .setLinearHeadingInterpolation(secondShotPose.getHeading(), gateReloadStartPose.getHeading())
@@ -375,13 +385,13 @@ public class RedAutoCloseRange15BallOdo_gateReload extends OpMode {
                 .setLinearHeadingInterpolation(gateReloadStartPose.getHeading(), gateReloadPose.getHeading())
                 .build();
 
-        // ======================================================
-        // CHANGED: gateReloadPose -> secondShotPose
-        // NOW a BezierCurve using the SAME control point (85, 65)
-        // ======================================================
+        // UPDATED: gateReloadPose -> postGateMidPose -> secondShotPose
+        // (matches your Blue logic: insert postGateMidPose after the gate)
         gateReloadToShot_A = follower.pathBuilder()
-                .addPath(new BezierCurve(gateReloadPose, shot2ToGateControlPose, secondShotPose))
-                .setLinearHeadingInterpolation(gateReloadPose.getHeading(), secondShotPose.getHeading())
+                .addPath(new BezierLine(gateReloadPose, postGateMidPose))
+                .setLinearHeadingInterpolation(gateReloadPose.getHeading(), postGateMidPose.getHeading())
+                .addPath(new BezierCurve(postGateMidPose, shot2ToGateControlPose, secondShotPose))
+                .setLinearHeadingInterpolation(postGateMidPose.getHeading(), secondShotPose.getHeading())
                 .build();
 
         // secondShotPose -> reload1Start
@@ -396,28 +406,37 @@ public class RedAutoCloseRange15BallOdo_gateReload extends OpMode {
                 .setConstantHeadingInterpolation(Math.toRadians(0))
                 .build();
 
-        // reload1End -> shotPose
+        // reload1End -> (kept exactly as your file had it)
         reload1EndToShot = follower.pathBuilder()
-                .addPath(new BezierLine(reload1End, shotPose))
+                .addPath(new BezierLine(reload1End, secondShotPose))
                 .setConstantHeadingInterpolation(Math.toRadians(0))
                 .build();
 
-        // shotPose -> gateReloadStartPose (second gate cycle)
-        shotToGateReloadStart_B = follower.pathBuilder()
-                .addPath(new BezierLine(shotPose, gateReloadStartPose))
-                .setLinearHeadingInterpolation(shotPose.getHeading(), gateReloadStartPose.getHeading())
+        // After reload1EndToShot: go through mid point first, then to gate start pose2
+        shotToGateMid_B = follower.pathBuilder()
+                .addPath(new BezierLine(secondShotPose, gateMidPose_B))
+                .setLinearHeadingInterpolation(secondShotPose.getHeading(), gateMidPose_B.getHeading())
                 .build();
 
-        // gateReloadStartPose -> gateReloadPose (bezier curve w/ control) (second time)
+        // IMPORTANT: your state machine uses getGateReloadStartPose2 as the end pose,
+        // so this path MUST end at getGateReloadStartPose2 (not gateReloadStartPose).
+        gateMidToGateReloadStart_B = follower.pathBuilder()
+                .addPath(new BezierLine(gateMidPose_B, getGateReloadStartPose2))
+                .setLinearHeadingInterpolation(gateMidPose_B.getHeading(), getGateReloadStartPose2.getHeading())
+                .build();
+
+        // gateReloadStartPose2 -> gateReloadPose (bezier curve w/ control) (second time)
         gateReloadStartToReload_B = follower.pathBuilder()
-                .addPath(new BezierCurve(gateReloadStartPose, gateReloadControlPose, gateReloadPose))
-                .setLinearHeadingInterpolation(gateReloadStartPose.getHeading(), gateReloadPose.getHeading())
+                .addPath(new BezierCurve(getGateReloadStartPose2, gateReloadControlPose, gateReloadPose))
+                .setLinearHeadingInterpolation(getGateReloadStartPose2.getHeading(), gateReloadPose.getHeading())
                 .build();
 
-        // gateReloadPose -> finalShotPose
+        // UPDATED: gateReloadPose -> postGateMidPose -> finalShotPose
         gateReloadToFinalShot = follower.pathBuilder()
-                .addPath(new BezierLine(gateReloadPose, finalShotPose))
-                .setLinearHeadingInterpolation(gateReloadPose.getHeading(), finalShotPose.getHeading())
+                .addPath(new BezierLine(gateReloadPose, postGateMidPose))
+                .setLinearHeadingInterpolation(gateReloadPose.getHeading(), postGateMidPose.getHeading())
+                .addPath(new BezierLine(postGateMidPose, finalShotPose))
+                .setLinearHeadingInterpolation(postGateMidPose.getHeading(), finalShotPose.getHeading())
                 .build();
     }
 
@@ -445,7 +464,6 @@ public class RedAutoCloseRange15BallOdo_gateReload extends OpMode {
                 break;
 
             case DRIVE_RELOAD2_END_TO_SHOT2:
-                // (collecting allowed; you did not request intake-off on this leg)
                 driveCollect(reload2EndToShot2, secondShotPose, PathState.SHOOT_2);
                 break;
 
@@ -453,7 +471,7 @@ public class RedAutoCloseRange15BallOdo_gateReload extends OpMode {
                 runShootStateThenAdvance(PathState.DRIVE_SHOT2_TO_GATERELOAD_START);
                 break;
 
-            // -------- shot2 -> gate -> shot2 --------
+            // -------- shot2 -> gate -> shot3 --------
             case DRIVE_SHOT2_TO_GATERELOAD_START:
                 driveCollect(shot2ToGateReloadStart, gateReloadStartPose, PathState.WAIT_GATEPOS_0P5S_A);
                 break;
@@ -481,7 +499,7 @@ public class RedAutoCloseRange15BallOdo_gateReload extends OpMode {
                 startTurretSettle(getAutoAimTurretCmd());
 
                 intake1.setPower(-1.0);
-                intake2.setPower(0.4);
+                intake2.setPower(0.2);
                 flicker.setPower(0.0);
                 flipper.setPosition(0.662);
 
@@ -491,7 +509,6 @@ public class RedAutoCloseRange15BallOdo_gateReload extends OpMode {
                 break;
 
             case DRIVE_GATERELOAD_TO_SHOT_A:
-                // intake OFF while driving back to 2nd shot (now curved through same control point)
                 driveNoCollect(gateReloadToShot_A, secondShotPose, PathState.SHOOT_3);
                 break;
 
@@ -513,14 +530,18 @@ public class RedAutoCloseRange15BallOdo_gateReload extends OpMode {
                 break;
 
             case SHOOT_4:
-                runShootStateThenAdvance(PathState.DRIVE_SHOT_TO_GATERELOAD_START_B);
+                runShootStateThenAdvance(PathState.DRIVE_SHOT_TO_GATE_MID_B);
+                break;
+
+            case DRIVE_SHOT_TO_GATE_MID_B:
+                driveCollect(shotToGateMid_B, gateMidPose_B, PathState.DRIVE_GATE_MID_TO_GATERELOAD_START_B);
+                break;
+
+            case DRIVE_GATE_MID_TO_GATERELOAD_START_B:
+                driveCollect(gateMidToGateReloadStart_B, getGateReloadStartPose2, PathState.WAIT_GATEPOS_0P5S_B);
                 break;
 
             // -------- shot -> gate -> final shot --------
-            case DRIVE_SHOT_TO_GATERELOAD_START_B:
-                driveCollect(shotToGateReloadStart_B, gateReloadStartPose, PathState.WAIT_GATEPOS_0P5S_B);
-                break;
-
             case WAIT_GATEPOS_0P5S_B:
                 shooterSys.update();
                 startTurretSettle(getAutoAimTurretCmd());
@@ -554,7 +575,6 @@ public class RedAutoCloseRange15BallOdo_gateReload extends OpMode {
                 break;
 
             case DRIVE_GATERELOAD_TO_FINALSHOT:
-                // intake OFF while driving to final shot
                 driveNoCollect(gateReloadToFinalShot, finalShotPose, PathState.SHOOT_FINAL);
                 break;
 
@@ -787,10 +807,10 @@ public class RedAutoCloseRange15BallOdo_gateReload extends OpMode {
                 8.0,
                 180, 15.5022,
                 new double[]{16, 32, 48, 64, 80, 120},
-                new double[]{0.310, 0.520, 0.720, 0.730, 0.780, 0.790},
-                new double[]{1020, 1055, 1120, 1200, 1260, 1440},
-                new double[]{1040, 1080, 1130, 1215, 1280, 1470},
-                new double[]{1050, 1090, 1150, 1230, 1300, 1500},
+                new double[]{0.310, 0.520, 0.650, 0.670, 0.780, 0.790},
+                new double[]{1020, 1055, 1120, 1190, 1260, 1440},
+                new double[]{1040, 1080, 1130, 1205, 1280, 1470},
+                new double[]{1050, 1090, 1145, 1220, 1300, 1500},
                 110
         );
 

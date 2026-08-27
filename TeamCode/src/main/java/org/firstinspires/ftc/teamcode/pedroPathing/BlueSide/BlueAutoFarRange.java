@@ -4,12 +4,14 @@ import com.pedropathing.follower.Follower;
 import com.pedropathing.geometry.BezierLine;
 import com.pedropathing.geometry.Pose;
 import com.pedropathing.paths.PathChain;
+
 import com.qualcomm.hardware.limelightvision.Limelight3A;
 import com.qualcomm.hardware.limelightvision.LLResult;
 import com.qualcomm.hardware.limelightvision.LLResultTypes;
 import com.qualcomm.robotcore.eventloop.opmode.Autonomous;
 import com.pedropathing.util.Timer;
 import com.qualcomm.robotcore.eventloop.opmode.OpMode;
+
 import com.qualcomm.robotcore.hardware.DcMotor;
 import com.qualcomm.robotcore.hardware.DcMotorEx;
 import com.qualcomm.robotcore.hardware.PIDFCoefficients;
@@ -21,13 +23,14 @@ import org.firstinspires.ftc.robotcore.external.navigation.Position;
 
 import org.firstinspires.ftc.teamcode.pedroPathing.subsystems.Constants;
 import org.firstinspires.ftc.teamcode.pedroPathing.subsystems.PoseStorage;
+import org.firstinspires.ftc.teamcode.pedroPathing.subsystems.FieldTransform;
 import org.firstinspires.ftc.teamcode.pedroPathing.subsystems.IntakeSubsystem;
 import org.firstinspires.ftc.teamcode.pedroPathing.subsystems.LoaderSubsystem;
 import org.firstinspires.ftc.teamcode.pedroPathing.subsystems.ShooterSubsystem;
 
 import java.util.List;
 
-@Autonomous(name = "BlueFarRange", group = "Blue")
+@Autonomous(name = "BlueAutoFarRange", group = "Blue")
 public class BlueAutoFarRange extends OpMode {
 
     private Follower follower;
@@ -41,26 +44,7 @@ public class BlueAutoFarRange extends OpMode {
     private static final String HOOD_NAME      = "Shooter hood";
     private static final String FLIPPER_NAME   = "fingler";
 
-    // ======= FIXED SHOOTER BEHAVIOR (NO CAMERA REQUIRED) =======
-    // CHANGE #2: min/max/target velocity
-    private static final double SHOOT_VEL_MIN = 1475.0;
-    private static final double SHOOT_VEL_MAX = 1520;
-    private static final double SHOOT_VEL_TGT = 1490;
-
-    private static final double READY_STABLE_SEC = 0.12;
-    private final com.qualcomm.robotcore.util.ElapsedTime rpmStableTimer = new com.qualcomm.robotcore.util.ElapsedTime();
-    private boolean rpmInBand = false;
-
-    private static final double FIXED_HOOD_POS = 0.790;
-    private boolean shooterHoldActive = false;
-
-    // ======= NEW: waits you requested =======
-    private static final double RELOAD_START_WAIT_SEC = 0.25;
-    private static final double SHOOTPOSE_WAIT_SEC    = 0.20;
-
-    // =====================================================================
-    // ================== TURRET AIMING (COPIED STRATEGY) ===================
-    // =====================================================================
+    // ======= TURRET AIMING (ODO + LL tx TRIM) =======
     private static final String TURRET_LEFT_NAME  = "LRotation";
     private static final String TURRET_RIGHT_NAME = "RRotation";
     private static final boolean MIRROR_RIGHT = false;
@@ -71,10 +55,11 @@ public class BlueAutoFarRange extends OpMode {
     private static final double TURRET_SETTLE_SEC = 0.20;
     private boolean turretSettleStarted = false;
     private double turretTargetPos = TURRET_START_POS;
-    private final com.qualcomm.robotcore.util.ElapsedTime turretSettleTimer = new com.qualcomm.robotcore.util.ElapsedTime();
+    private final com.qualcomm.robotcore.util.ElapsedTime turretSettleTimer =
+            new com.qualcomm.robotcore.util.ElapsedTime();
 
     // ==========================================================
-    // ODOMETRY + VISION TRIM TURRET AIM (PEDRO POSE, BLUE ONLY)
+    // ODOMETRY + VISION TRIM TURRET AIM (PEDRO POSE, BLUE)
     // ==========================================================
     private static final double BLUE_GOAL_PX = 2;
     private static final double BLUE_GOAL_PY = 142;
@@ -105,17 +90,20 @@ public class BlueAutoFarRange extends OpMode {
 
     private static final double VISION_MAX_ABS_TX_DEG = 8.0;
 
-    // CHANGE: bias turret back toward home (negative CW)
-    private static final double TURRET_BIAS_DEG_CW = -2.75;
+    // (kept same “model” as Red Far: small bias)
+    private static final double TURRET_BIAS_DEG_CW = -1.00;
 
     private double lastTurretCmd = TURRET_HOME;
-    private final com.qualcomm.robotcore.util.ElapsedTime loopTimer = new com.qualcomm.robotcore.util.ElapsedTime();
+    private final com.qualcomm.robotcore.util.ElapsedTime loopTimer =
+            new com.qualcomm.robotcore.util.ElapsedTime();
 
     private boolean visionHasGood = false;
     private double visionTrimDegCW = 0.0;
     private double visionTrimDegCW_raw = 0.0;
-    private final com.qualcomm.robotcore.util.ElapsedTime visionLastGoodTimer = new com.qualcomm.robotcore.util.ElapsedTime();
-    private final com.qualcomm.robotcore.util.ElapsedTime visionDecayTimer = new com.qualcomm.robotcore.util.ElapsedTime();
+    private final com.qualcomm.robotcore.util.ElapsedTime visionLastGoodTimer =
+            new com.qualcomm.robotcore.util.ElapsedTime();
+    private final com.qualcomm.robotcore.util.ElapsedTime visionDecayTimer =
+            new com.qualcomm.robotcore.util.ElapsedTime();
 
     private boolean tagSeen = false;
     private int tagId = -1;
@@ -125,71 +113,34 @@ public class BlueAutoFarRange extends OpMode {
     private double txDeg = Double.NaN;
 
     // ==========================================================
-    // Pre-shoot readiness latch (RPM-based; camera not required)
+    // Pre-shoot readiness latch (pre-check while driving; never fire until stopped)
     // ==========================================================
     private static final double READY_LATCH_HOLD_SEC = 0.50;
     private static final double PRECHECK_DIST_IN = 10.0;
 
     private boolean readyLatched = false;
-    private final com.qualcomm.robotcore.util.ElapsedTime readyLatchTimer = new com.qualcomm.robotcore.util.ElapsedTime();
+    private final com.qualcomm.robotcore.util.ElapsedTime readyLatchTimer =
+            new com.qualcomm.robotcore.util.ElapsedTime();
 
     // ==========================================================
-    // PoseStorage seeding (Pedro -> FTC) for TeleOp
+    // "never deadlocks" gate when tag is missing
     // ==========================================================
-    private static final double FIELD_HALF_IN = 72.0;
-    private static final double PEDRO_TO_FTC_HEADING_OFFSET_DEG = +90.0;
+    private static final double NO_TAG_START_TIMEOUT_SEC = 0.70;
+    private final com.qualcomm.robotcore.util.ElapsedTime shootGateTimer =
+            new com.qualcomm.robotcore.util.ElapsedTime();
 
-    private static double pedroToFtcX(double pedroY) { return FIELD_HALF_IN - pedroY; }
-    private static double pedroToFtcY(double pedroX) { return pedroX - FIELD_HALF_IN; }
+    // ======= waits (match Red Far model) =======
+    private static final double RELOAD_START_WAIT_SEC = 0.25;
+    private static final double SHOOTPOSE_WAIT_SEC    = 0.50;
 
-    // ==========================================================
-    // States
-    // ==========================================================
-    public enum PathState {
-        // NEW: drive to shot point first, then wait 0.5s, then shoot
-        DRIVE_START_TO_SHOOTPOSE,
-        WAIT_AT_SHOOTPOSE,
-        END_LOAD_AT_START,
-        SHOOT_VOLLEY_START,
-
-        // First reload: add 0.25s wait after reaching reload start
-        DRIVE_3RDSHOT_TO_3RDRELOADSTART,
-        WAIT_AT_RELOAD1_START,
-        DRIVE_3RDRELOADSTART_TO_END,
-        RELOAD3_DECOMPRESS,
-
-        DRIVE_1STRELOAD_TO_SHOOTPOS,
-        END_LOAD_AT_SHOOT_POS,
-        SHOOT_VOLLEY_1,
-
-        // Second reload (alliance area): add 0.25s wait after reaching reload start
-        DRIVE_SHOT_TO_2NDRELOAD_START,
-        WAIT_AT_RELOAD2_START,
-        DRIVE_2NDRELOAD_AGAIN,
-        DRIVE_2NDRELOAD_FINALROUND,
-        RELOAD2_DECOMPRESS,
-
-        DRIVE_2NDRELOAD_TO_SHOOTPOSE,
-        END_LOAD_AT_SHOOT_POS_2,
-        SHOOT_VOLLEY_2,
-        FINAL_SHOT_TO_ENDPOSE,
-
-        // NEW: terminal state to stop shootingState + auto-aim
-        DONE
-    }
-
-    PathState pathState;
-
-    // ======= POSES =======
+    // ======= POSES (BLUE - from your BlueFarRange code) =======
     private final Pose startPose = new Pose(60.000, 10.000, Math.toRadians(180));
-
-    // NEW: your requested shooter position and wait-before-shoot
     private final Pose shootPose = new Pose(55.000, 20.000, Math.toRadians(155));
 
     private final Pose firstReloadStart = new Pose(41.000, 35.000, Math.toRadians(180));
-    private final Pose firstReloadEnd   = new Pose(20.0,   35.0,  Math.toRadians(180));
+    private final Pose firstReloadEnd   = new Pose(20.000, 35.000, Math.toRadians(180));
 
-    private final Pose endPose = new Pose(52, 35, Math.toRadians(90));
+    private final Pose endPose = new Pose(52.000, 35.000, Math.toRadians(90));
 
     // ======= PATH CHAINS =======
     private PathChain driveStartToShootPose;
@@ -201,13 +152,12 @@ public class BlueAutoFarRange extends OpMode {
     private PathChain _ShotTo2ndReload;
     private PathChain _2ndReloadAgain;
     private PathChain _2ndReloadFinalRound;
-    private PathChain driveOffLine;
-
-    // IMPORTANT CHANGE: after 2nd reload sweep, drive back to shooter position
     private PathChain _2ndReloadToShootPose;
 
+    private PathChain driveOffLine;
+
     // Hardware
-    private Limelight3A limelight; // optional
+    private Limelight3A limelight;
     private DcMotorEx shooter;
     private DcMotorEx flicker;
     private DcMotorEx intake1;
@@ -216,8 +166,8 @@ public class BlueAutoFarRange extends OpMode {
     private Servo flipper;
 
     private IntakeSubsystem intake;
-    private ShooterSubsystem shooterSys;
     private LoaderSubsystem loader;
+    private ShooterSubsystem shooterSys;
 
     // Volley control
     private boolean startedVolleyStart = false;
@@ -233,7 +183,7 @@ public class BlueAutoFarRange extends OpMode {
     private boolean endLoadStarted2 = false;
 
     private static final double PRIME_FEED_SEC  = 0.45;
-    private static final double SETTLE_HOLD_SEC = 0.20;
+    private static final double SETTLE_HOLD_SEC = 0.25;
 
     private static final double RELOAD_DECOMPRESS_SEC = 0.12;
     private boolean reload3DecompressStarted = false;
@@ -246,135 +196,136 @@ public class BlueAutoFarRange extends OpMode {
         if (intake != null) intake.setEnabled(on);
     }
 
-    // ======= NEW: gating turret movement until after START =======
-    private boolean allowTurretMotion = false;
+    // ======= NEW: no init movement; do first servo+enable commands in start() only =======
+    private boolean didStartCommands = false;
+
+    // ======= END-OF-AUTO FAILSAFE (same as Red Far) =======
+    private static final double AUTO_TOTAL_SEC = 30.0;
+    private static final double FORCE_END_WITH_SEC_LEFT = 3.0;
+    private boolean forcedEndStarted = false;
 
     // ==========================================================
-    // Shooter hold helpers
+    // States (same as Red Far)
     // ==========================================================
-    private void startShooterHold1440() {
-        shooterHoldActive = true;
-        rpmInBand = false;
-        rpmStableTimer.reset();
-        if (shooter != null) shooter.setVelocity(SHOOT_VEL_TGT); // CHANGE #2
-        if (hood != null) hood.setPosition(FIXED_HOOD_POS);
+    public enum PathState {
+        DRIVE_START_TO_SHOOTPOSE,
+        WAIT_AT_SHOOTPOSE,
+        END_LOAD_AT_START,
+        SHOOT_VOLLEY_START,
+
+        DRIVE_3RDSHOT_TO_3RDRELOADSTART,
+        WAIT_AT_RELOAD1_START,
+        DRIVE_3RDRELOADSTART_TO_END,
+        RELOAD3_DECOMPRESS,
+
+        DRIVE_1STRELOAD_TO_SHOOTPOS,
+        END_LOAD_AT_SHOOT_POS,
+        SHOOT_VOLLEY_1,
+
+        DRIVE_SHOT_TO_2NDRELOAD_START,
+        WAIT_AT_RELOAD2_START,
+        DRIVE_2NDRELOAD_AGAIN,
+        DRIVE_2NDRELOAD_FINALROUND,
+        RELOAD2_DECOMPRESS,
+
+        DRIVE_2NDRELOAD_TO_SHOOTPOSE,
+        END_LOAD_AT_SHOOT_POS_2,
+        SHOOT_VOLLEY_2,
+
+        FINAL_SHOT_TO_ENDPOSE,
+        DONE
     }
 
-    private void stopShooterHold() {
-        shooterHoldActive = false;
-        rpmInBand = false;
-        rpmStableTimer.reset();
-        if (shooter != null) shooter.setVelocity(0);
-    }
-
-    private boolean isShooterReadyStableFixed() {
-        if (shooter == null) return false;
-        double v = shooter.getVelocity();
-        boolean inBand = (v >= SHOOT_VEL_MIN) && (v <= SHOOT_VEL_MAX); // CHANGE #2
-
-        if (inBand) {
-            if (!rpmInBand) {
-                rpmInBand = true;
-                rpmStableTimer.reset();
-            }
-            return rpmStableTimer.seconds() >= READY_STABLE_SEC;
-        } else {
-            rpmInBand = false;
-            rpmStableTimer.reset();
-            return false;
-        }
-    }
+    PathState pathState;
 
     // ==========================================================
-    // Paths
+    // PoseStorage force-write helper
+    // ==========================================================
+    private void writePoseStorageNow() {
+        if (follower == null) return;
+        Pose p = follower.getPose();
+        FieldTransform.writePoseStorageFromPedro(p.getX(), p.getY(), Math.toDegrees(p.getHeading()));
+    }
+
+    private void forceGoToEndPoseNow() {
+        if (forcedEndStarted) return;
+        forcedEndStarted = true;
+
+        try { setVolleyAssist(false); } catch (Exception ignored) {}
+        try { loader.stopAll(); } catch (Exception ignored) {}
+        try { intake.setEnabled(false); } catch (Exception ignored) {}
+
+        try { startTurretSettle(0.5); } catch (Exception ignored) {}
+
+        follower.followPath(driveOffLine, true);
+        setPathState(PathState.FINAL_SHOT_TO_ENDPOSE);
+    }
+
+    // ==========================================================
+    // Paths (blue coords, red behavior)
     // ==========================================================
     public void buildPaths() {
 
-        // NEW: start -> shooter point (55,20,155)
         driveStartToShootPose = follower.pathBuilder().addPath(
-                        new BezierLine(
-                                startPose,
-                                shootPose
-                        )
+                        new BezierLine(startPose, shootPose)
                 ).setLinearHeadingInterpolation(startPose.getHeading(), shootPose.getHeading())
                 .build();
 
         _3rdshotto3rdreloadstart = follower.pathBuilder().addPath(
-                        new BezierLine(
-                                startPose,
-                                firstReloadStart
-                        )
+                        new BezierLine(startPose, firstReloadStart)
                 ).setLinearHeadingInterpolation(Math.toRadians(180), Math.toRadians(180))
                 .build();
 
         _3rdreloadstarttoend = follower.pathBuilder().addPath(
-                        new BezierLine(
-                                firstReloadStart,
-                                firstReloadEnd
-                        )
+                        new BezierLine(firstReloadStart, firstReloadEnd)
                 ).setTangentHeadingInterpolation()
                 .build();
 
         _1stReloadToShootPos = follower.pathBuilder().addPath(
-                        new BezierLine(
-                                firstReloadEnd,
-                                shootPose
-                        )
+                        new BezierLine(firstReloadEnd, shootPose)
                 ).setLinearHeadingInterpolation(Math.toRadians(180), shootPose.getHeading())
                 .build();
 
+        // ===== reload2 triangle (from your BlueFarRange) =====
+        Pose p2a = new Pose(11.000, 15.000, Math.toRadians(180));
+        Pose p2b = new Pose(20.000, 11.000, Math.toRadians(180));
+        Pose p2c = new Pose(11.000, 11.000, Math.toRadians(180));
+
         _ShotTo2ndReload = follower.pathBuilder().addPath(
-                        new BezierLine(
-                                shootPose,
-                                new Pose(13.000, 15.000)
-                        )
+                        new BezierLine(shootPose, p2a)
                 ).setLinearHeadingInterpolation(shootPose.getHeading(), Math.toRadians(180))
                 .build();
 
         _2ndReloadAgain = follower.pathBuilder().addPath(
-                        new BezierLine(
-                                new Pose(13.000, 15.000),
-                                new Pose(20.000, 11.000)
-                        )
+                        new BezierLine(p2a, p2b)
                 ).setLinearHeadingInterpolation(Math.toRadians(180), Math.toRadians(180))
                 .build();
 
         _2ndReloadFinalRound = follower.pathBuilder().addPath(
-                        new BezierLine(
-                                new Pose(20.000, 11.000),
-                                new Pose(13.000, 11.000)
-                        )
+                        new BezierLine(p2b, p2c)
                 ).setTangentHeadingInterpolation()
                 .build();
 
-        // IMPORTANT CHANGE: return to shootPose (55,20,155) after the alliance-area sweep
         _2ndReloadToShootPose = follower.pathBuilder().addPath(
-                        new BezierLine(
-                                new Pose(13.000, 11.000),
-                                shootPose
-                        )
+                        new BezierLine(p2c, shootPose)
                 ).setLinearHeadingInterpolation(Math.toRadians(180), shootPose.getHeading())
                 .build();
 
         driveOffLine = follower.pathBuilder().addPath(
-                        new BezierLine(shootPose,endPose))
-                .setLinearHeadingInterpolation(shootPose.getHeading(),endPose.getHeading())
+                        new BezierLine(shootPose, endPose)
+                ).setLinearHeadingInterpolation(shootPose.getHeading(), endPose.getHeading())
                 .build();
-
     }
 
     // ==========================================================
-    // State machine
+    // State machine (same behavior model as Red Far)
     // ==========================================================
     public void statePathUpdate() {
         switch (pathState) {
 
-            // ======================================================
-            // NEW OPENING: drive out to shooter point, wait 0.5s, then start shooting sequence
-            // ======================================================
             case DRIVE_START_TO_SHOOTPOSE:
+                resetReadyLatch();
                 if (follower.isBusy()) {
-                    // keep everything safe while driving out
                     if (!volleyAssistActive) intake.setEnabled(false);
                     loader.hold();
                 } else {
@@ -384,13 +335,11 @@ public class BlueAutoFarRange extends OpMode {
                 break;
 
             case WAIT_AT_SHOOTPOSE:
-                // wait 0.5 seconds at shoot pose before starting load/shoot
                 if (pathTimer.getElapsedTimeSeconds() < SHOOTPOSE_WAIT_SEC) {
                     if (!volleyAssistActive) intake.setEnabled(false);
                     loader.hold();
                     break;
                 }
-                // now begin the normal pre-load at start (which is now the shootPose)
                 endLoadStartedStart = false;
                 startedVolleyStart = false;
                 finishedVolleyStart = false;
@@ -398,17 +347,24 @@ public class BlueAutoFarRange extends OpMode {
                 setPathState(PathState.END_LOAD_AT_START);
                 break;
 
-            // ======================================================
-            // Shoot from shootPose (your “start shooting sequence”)
-            // ======================================================
             case END_LOAD_AT_START: {
+                shooterSys.update();
+                startTurretSettle(getAutoAimTurretCmd());
+
+                if (follower.isBusy()) {
+                    if (!volleyAssistActive) intake.setEnabled(false);
+                    loader.hold();
+                    updateReadyLatchNear(shootPose);
+                    break;
+                }
+
                 if (!isTurretSettled()) {
                     if (!volleyAssistActive) intake.setEnabled(false);
                     loader.hold();
                     break;
                 }
 
-                boolean ready = isShooterReadyStableFixed();
+                boolean ready = shooterSys.isShooterReadyStable();
 
                 if (!endLoadStartedStart) {
                     endLoadStartedStart = true;
@@ -432,6 +388,7 @@ public class BlueAutoFarRange extends OpMode {
                     loader.decompress();
                     if (!volleyAssistActive) intake.setEnabled(false);
 
+                    shooterSys.resetReadyStable();
                     startedVolleyStart = false;
                     finishedVolleyStart = false;
 
@@ -441,8 +398,10 @@ public class BlueAutoFarRange extends OpMode {
             }
 
             case SHOOT_VOLLEY_START: {
+                shooterSys.update();
+                startTurretSettle(getAutoAimTurretCmd());
+
                 if (finishedVolleyStart) {
-                    stopShooterHold();
                     setVolleyAssist(false);
                     loader.stopAll();
 
@@ -457,37 +416,36 @@ public class BlueAutoFarRange extends OpMode {
                     break;
                 }
 
-                boolean okToStart = isShooterReadyStableFixed() || isReadyLatched();
+                boolean tagSeenNow = shooterSys.isTagSeen();
+                boolean readyStable = shooterSys.isShooterReadyStable();
+                boolean timeoutNoTag = shootGateTimer.seconds() >= NO_TAG_START_TIMEOUT_SEC;
+                boolean okToStart = (tagSeenNow && readyStable) || isReadyLatched() || (timeoutNoTag && readyStable);
 
                 if (!startedVolleyStart) loader.hold();
 
-                if (!startedVolleyStart && okToStart) {
+                if (!startedVolleyStart && shooterSys.isEnabled() && okToStart) {
                     startedVolleyStart = true;
                     finishedVolleyStart = false;
+                    shooterSys.resetReadyStable();
                     loader.startFourShot();
                 }
 
                 if (startedVolleyStart && !finishedVolleyStart) {
-                    loader.updateFourShot(isShooterReadyStableFixed());
+                    loader.updateFourShot(shooterSys.isShooterReadyStable());
 
                     if (!volleyAssistActive && loader.getState() == LoaderSubsystem.SeqState.SHOT1_RECOVER) {
                         setVolleyAssist(true);
                     }
 
-                    if (loader.getState() == LoaderSubsystem.SeqState.DONE)
-                        finishedVolleyStart = true;
+                    if (loader.getState() == LoaderSubsystem.SeqState.DONE) finishedVolleyStart = true;
                 }
                 break;
             }
 
-            // ======================================================
-            // First reload: ADD 0.25s wait after reaching reload start
-            // ======================================================
             case DRIVE_3RDSHOT_TO_3RDRELOADSTART:
                 if (follower.isBusy()) {
                     intake.setEnabled(true);
                 } else {
-                    // NEW: wait 0.25 sec at reload start before sweeping
                     pathTimer.resetTimer();
                     setPathState(PathState.WAIT_AT_RELOAD1_START);
                 }
@@ -522,8 +480,6 @@ public class BlueAutoFarRange extends OpMode {
                 if (pathTimer.getElapsedTimeSeconds() >= RELOAD_DECOMPRESS_SEC) {
                     loader.hold();
 
-                    startShooterHold1440();
-
                     follower.followPath(_1stReloadToShootPos, true);
                     resetReadyLatch();
 
@@ -537,6 +493,9 @@ public class BlueAutoFarRange extends OpMode {
                 break;
 
             case DRIVE_1STRELOAD_TO_SHOOTPOS:
+                shooterSys.update();
+                startTurretSettle(getAutoAimTurretCmd());
+
                 if (follower.isBusy()) {
                     updateReadyLatchNear(shootPose);
                     intake.setEnabled(false);
@@ -550,13 +509,16 @@ public class BlueAutoFarRange extends OpMode {
                 break;
 
             case END_LOAD_AT_SHOOT_POS: {
+                shooterSys.update();
+                startTurretSettle(getAutoAimTurretCmd());
+
                 if (!isTurretSettled()) {
                     if (!volleyAssistActive) intake.setEnabled(false);
                     loader.hold();
                     break;
                 }
 
-                boolean readyEL = isShooterReadyStableFixed();
+                boolean readyEL = shooterSys.isShooterReadyStable();
 
                 if (!endLoadStarted) {
                     endLoadStarted = true;
@@ -580,6 +542,7 @@ public class BlueAutoFarRange extends OpMode {
                     loader.decompress();
                     if (!volleyAssistActive) intake.setEnabled(false);
 
+                    shooterSys.resetReadyStable();
                     startedVolley1 = false;
                     finishedVolley1 = false;
 
@@ -589,11 +552,12 @@ public class BlueAutoFarRange extends OpMode {
             }
 
             case SHOOT_VOLLEY_1: {
+                shooterSys.update();
+                startTurretSettle(getAutoAimTurretCmd());
+
                 if (finishedVolley1) {
                     setVolleyAssist(false);
                     loader.stopAll();
-
-                    stopShooterHold();
 
                     follower.followPath(_ShotTo2ndReload, true);
                     intake.setEnabled(true);
@@ -606,18 +570,22 @@ public class BlueAutoFarRange extends OpMode {
                     break;
                 }
 
-                boolean okToStartV1 = isShooterReadyStableFixed() || isReadyLatched();
+                boolean tagSeenNow = shooterSys.isTagSeen();
+                boolean readyStable = shooterSys.isShooterReadyStable();
+                boolean timeoutNoTag = shootGateTimer.seconds() >= NO_TAG_START_TIMEOUT_SEC;
+                boolean okToStart = (tagSeenNow && readyStable) || isReadyLatched() || (timeoutNoTag && readyStable);
 
                 if (!startedVolley1) loader.hold();
 
-                if (!startedVolley1 && okToStartV1) {
+                if (!startedVolley1 && shooterSys.isEnabled() && okToStart) {
                     startedVolley1 = true;
                     finishedVolley1 = false;
+                    shooterSys.resetReadyStable();
                     loader.startFourShot();
                 }
 
                 if (startedVolley1 && !finishedVolley1) {
-                    loader.updateFourShot(isShooterReadyStableFixed());
+                    loader.updateFourShot(shooterSys.isShooterReadyStable());
 
                     if (!volleyAssistActive && loader.getState() == LoaderSubsystem.SeqState.SHOT1_RECOVER) {
                         setVolleyAssist(true);
@@ -628,14 +596,10 @@ public class BlueAutoFarRange extends OpMode {
                 break;
             }
 
-            // ======================================================
-            // Second reload: ADD 0.25s wait at reload start
-            // ======================================================
             case DRIVE_SHOT_TO_2NDRELOAD_START:
                 if (follower.isBusy()) {
                     intake.setEnabled(true);
                 } else {
-                    // NEW: wait 0.25 sec at reload start before starting sweep
                     pathTimer.resetTimer();
                     setPathState(PathState.WAIT_AT_RELOAD2_START);
                 }
@@ -680,9 +644,6 @@ public class BlueAutoFarRange extends OpMode {
                 if (pathTimer.getElapsedTimeSeconds() >= RELOAD_DECOMPRESS_SEC) {
                     loader.hold();
 
-                    startShooterHold1440();
-
-                    // IMPORTANT: drive back to shooter position after sweep
                     follower.followPath(_2ndReloadToShootPose, true);
                     resetReadyLatch();
 
@@ -696,6 +657,9 @@ public class BlueAutoFarRange extends OpMode {
                 break;
 
             case DRIVE_2NDRELOAD_TO_SHOOTPOSE:
+                shooterSys.update();
+                startTurretSettle(getAutoAimTurretCmd());
+
                 if (follower.isBusy()) {
                     intake.setEnabled(false);
                     loader.hold();
@@ -709,13 +673,16 @@ public class BlueAutoFarRange extends OpMode {
                 break;
 
             case END_LOAD_AT_SHOOT_POS_2: {
+                shooterSys.update();
+                startTurretSettle(getAutoAimTurretCmd());
+
                 if (!isTurretSettled()) {
                     if (!volleyAssistActive) intake.setEnabled(false);
                     loader.hold();
                     break;
                 }
 
-                boolean readyEL2 = isShooterReadyStableFixed();
+                boolean readyEL2 = shooterSys.isShooterReadyStable();
 
                 if (!endLoadStarted2) {
                     endLoadStarted2 = true;
@@ -739,6 +706,7 @@ public class BlueAutoFarRange extends OpMode {
                     loader.decompress();
                     if (!volleyAssistActive) intake.setEnabled(false);
 
+                    shooterSys.resetReadyStable();
                     startedVolley2 = false;
                     finishedVolley2 = false;
 
@@ -748,13 +716,14 @@ public class BlueAutoFarRange extends OpMode {
             }
 
             case SHOOT_VOLLEY_2: {
+                shooterSys.update();
+                startTurretSettle(getAutoAimTurretCmd());
+
                 if (finishedVolley2) {
                     startTurretSettle(0.5);
                     setVolleyAssist(false);
                     loader.stopAll();
-                    stopShooterHold();
 
-                    // ===== FIX: actually drive off line, then go DONE =====
                     follower.followPath(driveOffLine, true);
                     setPathState(PathState.FINAL_SHOT_TO_ENDPOSE);
                     break;
@@ -765,18 +734,22 @@ public class BlueAutoFarRange extends OpMode {
                     break;
                 }
 
-                boolean okToStartV2 = isShooterReadyStableFixed() || isReadyLatched();
+                boolean tagSeenNow = shooterSys.isTagSeen();
+                boolean readyStable = shooterSys.isShooterReadyStable();
+                boolean timeoutNoTag = shootGateTimer.seconds() >= NO_TAG_START_TIMEOUT_SEC;
+                boolean okToStart = (tagSeenNow && readyStable) || isReadyLatched() || (timeoutNoTag && readyStable);
 
                 if (!startedVolley2) loader.hold();
 
-                if (!startedVolley2 && okToStartV2) {
+                if (!startedVolley2 && shooterSys.isEnabled() && okToStart) {
                     startedVolley2 = true;
                     finishedVolley2 = false;
+                    shooterSys.resetReadyStable();
                     loader.startFourShot();
                 }
 
                 if (startedVolley2 && !finishedVolley2) {
-                    loader.updateFourShot(isShooterReadyStableFixed());
+                    loader.updateFourShot(shooterSys.isShooterReadyStable());
 
                     if (!volleyAssistActive && loader.getState() == LoaderSubsystem.SeqState.SHOT1_RECOVER) {
                         setVolleyAssist(true);
@@ -788,7 +761,6 @@ public class BlueAutoFarRange extends OpMode {
             }
 
             case FINAL_SHOT_TO_ENDPOSE:
-                // ===== FIX: wait for driveOffLine to finish, then DONE =====
                 if (!follower.isBusy()) {
                     setPathState(PathState.DONE);
                 }
@@ -796,6 +768,7 @@ public class BlueAutoFarRange extends OpMode {
 
             case DONE:
                 startTurretSettle(0.5);
+                writePoseStorageNow();
                 break;
 
             default:
@@ -807,22 +780,21 @@ public class BlueAutoFarRange extends OpMode {
     public void setPathState(PathState newState) {
         pathState = newState;
         pathTimer.resetTimer();
+        shootGateTimer.reset();
     }
 
+    // ==========================================================
+    // INIT / START / LOOP / STOP
+    // ==========================================================
     @Override
     public void init() {
-        // NEW: Start by driving to shootPose after start is pressed
         pathState = PathState.DRIVE_START_TO_SHOOTPOSE;
 
         pathTimer = new Timer();
         opModeTimer = new Timer();
         follower = Constants.createFollower(hardwareMap);
 
-        try {
-            limelight = hardwareMap.get(Limelight3A.class, LIMELIGHT_NAME);
-        } catch (Exception e) {
-            limelight = null;
-        }
+        limelight = hardwareMap.get(Limelight3A.class, LIMELIGHT_NAME);
 
         shooter = hardwareMap.get(DcMotorEx.class, SHOOTER_NAME);
         flicker = hardwareMap.get(DcMotorEx.class, FLICKER_NAME);
@@ -834,8 +806,7 @@ public class BlueAutoFarRange extends OpMode {
         turretLeft  = hardwareMap.get(Servo.class, TURRET_LEFT_NAME);
         turretRight = hardwareMap.get(Servo.class, TURRET_RIGHT_NAME);
 
-        // IMPORTANT: turret should not move in INIT
-        // applyTurret(TURRET_START_POS);
+        // ===== NO SERVO MOVEMENT IN INIT =====
         turretTargetPos = TURRET_START_POS;
         turretSettleStarted = false;
         turretSettleTimer.reset();
@@ -848,13 +819,6 @@ public class BlueAutoFarRange extends OpMode {
         visionHasGood = false;
         visionLastGoodTimer.reset();
         visionDecayTimer.reset();
-
-        // ==========================================================
-        // CHANGE: prevent ANY actuator motion in INIT by not commanding
-        // hood/flipper here. They will be commanded at START instead.
-        // ==========================================================
-        // flipper.setPosition(0.662);
-        // hood.setPosition(FIXED_HOOD_POS);
 
         shooter.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
         PIDFCoefficients pidf = new PIDFCoefficients(180, 0, 0, 15.5022);
@@ -872,7 +836,23 @@ public class BlueAutoFarRange extends OpMode {
                 120
         );
 
-        stopShooterHold();
+        // ===== ShooterSubsystem (same operating model as Red Far, but Blue tag/goal) =====
+        shooterSys = new ShooterSubsystem(
+                limelight, shooter, hood,
+                0,
+                -1, BLUE_GOAL_TAG_ID,
+                8.0,
+                180, 15.5022,
+                new double[]{16, 32, 48, 64, 80, 120},
+                new double[]{0.310, 0.530, 0.730, 0.750, 0.780, 0.790},
+                new double[]{1020, 1045, 1110, 1180, 1260, 1480},
+                new double[]{1040, 1060, 1120, 1200, 1280, 1490},
+                new double[]{1050, 1070, 1130, 1210, 1300, 1550},
+                110
+        );
+
+        shooterSys.startVision();
+        shooterSys.setEnabled(false); // no motion in init
 
         endLoadStartedStart = false;
         startedVolleyStart = false;
@@ -896,7 +876,8 @@ public class BlueAutoFarRange extends OpMode {
 
         setVolleyAssist(false);
 
-        allowTurretMotion = false;
+        didStartCommands = false;
+        forcedEndStarted = false;
 
         telemetry.addLine("Ready. Waiting for start.");
         telemetry.update();
@@ -905,26 +886,23 @@ public class BlueAutoFarRange extends OpMode {
     @Override
     public void start() {
         opModeTimer.resetTimer();
-
-        // CHANGE: now that START is pressed, command hood/flipper positions
-        flipper.setPosition(0.662);
-        hood.setPosition(FIXED_HOOD_POS);
-
-        // motor revs immediately once start is pressed
-        startShooterHold1440();
-
-        // turret starts moving only after START
-        allowTurretMotion = true;
-        turretSettleStarted = false;
-        turretSettleTimer.reset();
-
-        // NEW: command turret start position ONLY at START (no motion in INIT)
-        applyTurret(TURRET_START_POS);
-        turretTargetPos = TURRET_START_POS;
-        lastTurretCmd = clamp(TURRET_START_POS, SERVO_MIN_SAFE, SERVO_MAX_SAFE);
-
-        // Begin the state machine (drive out first)
         setPathState(pathState);
+
+        forcedEndStarted = false;
+
+        if (!didStartCommands) {
+            applyTurret(TURRET_START_POS);
+            turretTargetPos = TURRET_START_POS;
+            turretSettleStarted = false;
+            turretSettleTimer.reset();
+
+            flipper.setPosition(0.662);
+
+            // Shooter runs from start and stays on through drive legs (Red Far behavior)
+            shooterSys.setEnabled(true);
+
+            didStartCommands = true;
+        }
 
         // Kick off the initial path immediately
         follower.followPath(driveStartToShootPose, true);
@@ -934,31 +912,25 @@ public class BlueAutoFarRange extends OpMode {
     public void loop() {
         follower.update();
 
-        // CHANGE: auto-aim ONLY during shooting states (prevents wiggle while driving/reloading)
-        boolean shootingState =
-                pathState == PathState.END_LOAD_AT_START || pathState == PathState.SHOOT_VOLLEY_START ||
-                        pathState == PathState.END_LOAD_AT_SHOOT_POS || pathState == PathState.SHOOT_VOLLEY_1 ||
-                        pathState == PathState.END_LOAD_AT_SHOOT_POS_2 || pathState == PathState.SHOOT_VOLLEY_2;
+        // ======= FORCE ENDPOSE WITH 3s LEFT =======
+        double t = opModeTimer.getElapsedTimeSeconds();
+        double timeLeft = AUTO_TOTAL_SEC - t;
 
-        // turret + vision ONLY after start AND only while shooting
-        if (allowTurretMotion && shootingState) {
-            updateVisionTrim();
-            startTurretSettle(getAutoAimTurretCmd());
+        if (!forcedEndStarted
+                && timeLeft <= FORCE_END_WITH_SEC_LEFT
+                && pathState != PathState.FINAL_SHOT_TO_ENDPOSE
+                && pathState != PathState.DONE) {
+            forceGoToEndPoseNow();
         }
 
-        // maintain shooter hold if active (rev stays up while not reloading)
-        if (shooterHoldActive && shooter != null) shooter.setVelocity(SHOOT_VEL_TGT); // CHANGE #2
+        // feed shooter odometry-derived distance (vision used when available; odom when not)
+        shooterSys.setExternalDistanceIn(getAutoAimShooterDistanceIn());
+        shooterSys.update();
 
-        // PoseStorage seeding (Pedro -> FTC)
+        updateVisionTrim();
+
         Pose p = follower.getPose();
-        double pedroX = p.getX();
-        double pedroY = p.getY();
-        double pedroHeadingDeg = Math.toDegrees(p.getHeading());
-
-        PoseStorage.valid = true;
-        PoseStorage.xIn = pedroToFtcX(pedroY);
-        PoseStorage.yIn = pedroToFtcY(pedroX);
-        PoseStorage.headingDeg = wrapDeg180(pedroHeadingDeg + PEDRO_TO_FTC_HEADING_OFFSET_DEG);
+        FieldTransform.writePoseStorageFromPedro(p.getX(), p.getY(), Math.toDegrees(p.getHeading()));
 
         statePathUpdate();
 
@@ -969,11 +941,6 @@ public class BlueAutoFarRange extends OpMode {
 
         telemetry.addData("turret target", "%.3f", turretTargetPos);
         telemetry.addData("turret settled", isTurretSettled());
-        telemetry.addData("TurretEnabled", allowTurretMotion);
-
-        telemetry.addData("ShooterHold", shooterHoldActive);
-        telemetry.addData("ShooterVel", shooter != null ? shooter.getVelocity() : 0.0);
-        telemetry.addData("ShooterReadyStable", isShooterReadyStableFixed());
 
         telemetry.addData("Goal(Pedro)", "(%.2f, %.2f)", BLUE_GOAL_PX, BLUE_GOAL_PY);
         telemetry.addData("Vision TagSeen", tagSeen);
@@ -982,12 +949,22 @@ public class BlueAutoFarRange extends OpMode {
         telemetry.addData("TrimRaw CW(deg)", "%.2f", visionTrimDegCW_raw);
         telemetry.addData("TrimFilt CW(deg)", "%.2f", visionTrimDegCW);
 
-        telemetry.addData("VolleyAssist", volleyAssistActive);
+        telemetry.addData("Seed FTC X(in)", "%.2f", PoseStorage.xIn);
+        telemetry.addData("Seed FTC Y(in)", "%.2f", PoseStorage.yIn);
+        telemetry.addData("Seed FTC H(deg)", "%.1f", PoseStorage.headingDeg);
 
-        // CHANGE #1: turret cmd telemetry DURING SHOOTING
-        if (shootingState) {
-            telemetry.addData("TurretCmd(applied)", "%.4f", lastTurretCmd);
-        }
+        telemetry.addData("VolleyAssist", volleyAssistActive);
+        telemetry.addData("Shooter TagSeen", shooterSys.isTagSeen());
+        telemetry.addData("Shooter Dist(in)", "%.2f", shooterSys.getShooterDistanceIn());
+        telemetry.addData("Shooter RPM Tgt", "%.0f", shooterSys.getRpmTargetCmd());
+        telemetry.addData("Shooter HoodCmd", "%.3f", shooterSys.getHoodCmd());
+
+        telemetry.update();
+    }
+
+    @Override
+    public void stop() {
+        writePoseStorageNow();
     }
 
     // ======= TURRET HELPERS =======
@@ -1012,13 +989,11 @@ public class BlueAutoFarRange extends OpMode {
     }
 
     private boolean isTurretSettled() {
-        // if turret is not enabled yet, treat it as "settled" so it doesn't block init states
-        if (!allowTurretMotion) return true;
         return turretSettleStarted && turretSettleTimer.seconds() >= TURRET_SETTLE_SEC;
     }
 
     // ==========================================================
-    // Ready latch helpers (RPM-based)
+    // Ready latch helpers (matches Red Far: READY + TAG near shot pose)
     // ==========================================================
     private void resetReadyLatch() {
         readyLatched = false;
@@ -1038,10 +1013,34 @@ public class BlueAutoFarRange extends OpMode {
     private void updateReadyLatchNear(Pose shotPoseRef) {
         if (dist(follower.getPose(), shotPoseRef) > PRECHECK_DIST_IN) return;
 
-        if (isShooterReadyStableFixed()) {
+        boolean ready = shooterSys.isShooterReadyStable();
+        boolean tag = shooterSys.isTagSeen();
+
+        if (ready && tag) {
             readyLatched = true;
             readyLatchTimer.reset();
         }
+    }
+
+    // ==========================================================
+    // AutoAim shooter distance from Pedro pose (matches turret reference point)
+    // ==========================================================
+    private double getAutoAimShooterDistanceIn() {
+        Pose pose = follower.getPose();
+        double robotX = pose.getX();
+        double robotY = pose.getY();
+        double headingRad = pose.getHeading();
+
+        double fwdX = Math.cos(headingRad);
+        double fwdY = Math.sin(headingRad);
+
+        double leftX = -Math.sin(headingRad);
+        double leftY =  Math.cos(headingRad);
+
+        double turretX = robotX + fwdX * TURRET_FWD_OFFSET_IN + leftX * TURRET_LEFT_OFFSET_IN;
+        double turretY = robotY + fwdY * TURRET_FWD_OFFSET_IN + leftY * TURRET_LEFT_OFFSET_IN;
+
+        return Math.hypot(BLUE_GOAL_PX - turretX, BLUE_GOAL_PY - turretY);
     }
 
     // ==========================================================
@@ -1074,7 +1073,6 @@ public class BlueAutoFarRange extends OpMode {
         double relDegCCW = wrapDeg180(bearingDegField - headingDeg);
         double turretDegCW_odo = -relDegCCW;
 
-        // CHANGE: apply bias back toward home
         double turretDegCW_total = wrapDeg180(turretDegCW_odo + visionTrimDegCW + TURRET_BIAS_DEG_CW);
 
         double turretCmdTarget = TURRET_HOME + turretDegCW_total * POS_PER_DEG_CW;
@@ -1100,7 +1098,7 @@ public class BlueAutoFarRange extends OpMode {
     }
 
     // ==========================================================
-    // Vision trim update (camera optional)
+    // Vision trim update (BLUE TAG 20 ONLY)
     // ==========================================================
     private void updateVisionTrim() {
         tagSeen = false;
@@ -1110,45 +1108,26 @@ public class BlueAutoFarRange extends OpMode {
         camBearingDeg = Double.NaN;
         txDeg = Double.NaN;
 
-        if (limelight == null) {
-            handleVisionLost();
-            return;
-        }
+        if (limelight == null) { handleVisionLost(); return; }
 
         LLResult result = limelight.getLatestResult();
-        if (result == null || !result.isValid()) {
-            handleVisionLost();
-            return;
-        }
+        if (result == null || !result.isValid()) { handleVisionLost(); return; }
 
         try { txDeg = result.getTx(); } catch (Exception ignored) { txDeg = Double.NaN; }
 
         List<LLResultTypes.FiducialResult> tags = result.getFiducialResults();
-        if (tags == null || tags.isEmpty()) {
-            handleVisionLost();
-            return;
-        }
+        if (tags == null || tags.isEmpty()) { handleVisionLost(); return; }
 
         LLResultTypes.FiducialResult chosen = null;
         for (LLResultTypes.FiducialResult t : tags) {
             int id = (int) t.getFiducialId();
-            if (id == BLUE_GOAL_TAG_ID) {
-                chosen = t;
-                break;
-            }
+            if (id == BLUE_GOAL_TAG_ID) { chosen = t; break; }
         }
-        if (chosen == null) {
-            handleVisionLost();
-            return;
-        }
+        if (chosen == null) { handleVisionLost(); return; }
 
         Pose3D pose = null;
         try { pose = chosen.getCameraPoseTargetSpace(); } catch (Exception ignored) {}
-
-        if (pose == null) {
-            handleVisionLost();
-            return;
-        }
+        if (pose == null) { handleVisionLost(); return; }
 
         Position p = pose.getPosition();
 
@@ -1156,21 +1135,13 @@ public class BlueAutoFarRange extends OpMode {
         double zIn = DistanceUnit.INCH.fromUnit(p.unit, p.z);
         double zAbs = Math.abs(zIn);
 
-        if (zAbs < VISION_MIN_Z_IN || zAbs > VISION_MAX_Z_IN) {
-            handleVisionLost();
-            return;
-        }
-
-        if (Double.isNaN(txDeg) || Math.abs(txDeg) > VISION_MAX_ABS_TX_DEG) {
-            handleVisionLost();
-            return;
-        }
+        if (zAbs < VISION_MIN_Z_IN || zAbs > VISION_MAX_Z_IN) { handleVisionLost(); return; }
+        if (Double.isNaN(txDeg) || Math.abs(txDeg) > VISION_MAX_ABS_TX_DEG) { handleVisionLost(); return; }
 
         tagSeen = true;
         tagId = (int) chosen.getFiducialId();
         camX_in = xIn;
         camZ_in = zIn;
-
         camBearingDeg = txDeg;
 
         double trimCW = (VISION_X_SIGN * txDeg);
@@ -1197,10 +1168,7 @@ public class BlueAutoFarRange extends OpMode {
         }
 
         long msSince = (long) visionLastGoodTimer.milliseconds();
-
-        if (msSince <= VISION_HOLD_MS) {
-            return;
-        }
+        if (msSince <= VISION_HOLD_MS) return;
 
         double t = clamp(visionDecayTimer.milliseconds() / (double) VISION_DECAY_MS, 0.0, 1.0);
         visionTrimDegCW = (1.0 - t) * visionTrimDegCW;
